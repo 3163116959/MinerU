@@ -42,7 +42,11 @@ from mineru.cli.common import (
     read_fn,
     uniquify_task_stems,
 )
-from mineru.cli.api_request import ParseRequestOptions, parse_request_form
+from mineru.cli.api_request import (
+    ParseRequestOptions,
+    build_vlm_client_kwargs,
+    parse_request_form,
+)
 from mineru.cli.public_http_client_policy import (
     configure_public_http_client_policy,
     is_public_bind_host,
@@ -153,6 +157,8 @@ class AsyncParseTask:
     table_enable: bool
     image_analysis: bool
     server_url: Optional[str]
+    model: Optional[str]
+    api_key: Optional[str]
     return_md: bool
     return_middle_json: bool
     return_model_output: bool
@@ -857,6 +863,7 @@ async def run_parse_job(
             "client_side_output_generation",
             False,
         ),
+        **build_vlm_client_kwargs(request_options.model, request_options.api_key),
         **config,
     )
 
@@ -900,6 +907,8 @@ async def create_async_parse_task(
             table_enable=request_options.table_enable,
             image_analysis=request_options.image_analysis,
             server_url=request_options.server_url,
+            model=request_options.model,
+            api_key=request_options.api_key,
             return_md=request_options.return_md,
             return_middle_json=request_options.return_middle_json,
             return_model_output=request_options.return_model_output,

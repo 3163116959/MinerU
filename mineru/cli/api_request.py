@@ -1,6 +1,6 @@
 # Copyright (c) Opendatalab. All rights reserved.
 from dataclasses import dataclass
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import File, Form, HTTPException, Request, UploadFile
 
@@ -40,6 +40,8 @@ class ParseRequestOptions:
     table_enable: bool
     image_analysis: bool
     server_url: Optional[str]
+    model: Optional[str]
+    api_key: Optional[str]
     return_md: bool
     return_middle_json: bool
     return_model_output: bool
@@ -79,6 +81,38 @@ def validate_parse_effort(effort: str) -> str:
         return validate_public_effort(effort)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def validate_parse_model_credentials(
+    backend: str,
+    model: Optional[str],
+    api_key: Optional[str],
+) -> None:
+    """model/api_key 只对 http-client 后端有意义，其他后端传入即报错。"""
+    if backend.endswith("-http-client"):
+        return
+    for name, value in (("model", model), ("api_key", api_key)):
+        if value:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{name} is only supported by <vlm/hybrid>-http-client backends, "
+                    f"but backend is '{backend}'."
+                ),
+            )
+
+
+def build_vlm_client_kwargs(
+    model: Optional[str],
+    api_key: Optional[str],
+) -> dict[str, Any]:
+    """把请求级模型信息转换成 VLM http-client 的初始化参数。"""
+    client_kwargs: dict[str, Any] = {}
+    if model:
+        client_kwargs["model_name"] = model
+    if api_key:
+        client_kwargs["server_headers"] = {"Authorization": f"Bearer {api_key}"}
+    return client_kwargs
 
 
 def validate_parse_lang_list(lang_list: list[str]) -> list[str]:
@@ -159,6 +193,25 @@ async def parse_request_form(
             description="(Adapted only for <vlm/hybrid>-http-client backend)openai compatible server url, e.g., http://127.0.0.1:30000",
         ),
     ] = None,
+    model: Annotated[
+        Optional[str],
+        Form(
+            description=(
+                "(Adapted only for <vlm/hybrid>-http-client backend)model name served by "
+                "server_url, e.g., MinerU2.5-2509-1.2B. Defaults to the only model exposed "
+                "by the server."
+            ),
+        ),
+    ] = None,
+    api_key: Annotated[
+        Optional[str],
+        Form(
+            description=(
+                "(Adapted only for <vlm/hybrid>-http-client backend)API key sent to "
+                "server_url as `Authorization: Bearer <api_key>`."
+            ),
+        ),
+    ] = None,
     return_md: Annotated[
         bool,
         Form(description="Return markdown content in response"),
@@ -223,6 +276,7 @@ async def parse_request_form(
         backend=backend,
         server_url=server_url,
     )
+    validate_parse_model_credentials(backend, model, api_key)
     if client_side_output_generation:
         return_md = False
         return_middle_json = True
@@ -241,6 +295,8 @@ async def parse_request_form(
         table_enable=table_enable,
         image_analysis=image_analysis,
         server_url=server_url,
+        model=model,
+        api_key=api_key,
         return_md=return_md,
         return_middle_json=return_middle_json,
         return_model_output=return_model_output,

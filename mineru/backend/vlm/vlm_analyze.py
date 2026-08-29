@@ -40,6 +40,13 @@ from mineru_vl_utils import MinerUClient
 from packaging import version
 
 
+def _server_headers_cache_key(server_headers: dict | None):
+    """请求级 headers 参与缓存键，避免不同凭据复用同一个 predictor。"""
+    if not server_headers:
+        return None
+    return tuple(sorted(server_headers.items()))
+
+
 class ModelSingleton:
     _instance = None
     _models = {}
@@ -58,7 +65,15 @@ class ModelSingleton:
         server_url: str | None,
         **kwargs,
     ) -> MinerUClient:
-        key = (backend, model_path, server_url)
+        model_name = kwargs.get("model_name", None)  # for http-client backend only
+        server_headers = kwargs.get("server_headers", None)  # for http-client backend only
+        key = (
+            backend,
+            model_path,
+            server_url,
+            model_name,
+            _server_headers_cache_key(server_headers),
+        )
         with self._lock:
             if key not in self._models:
                 start_time = time.time()
@@ -70,11 +85,10 @@ class ModelSingleton:
                 batch_size = kwargs.get("batch_size", 0)  # for transformers backend only
                 max_concurrency = kwargs.get("max_concurrency", 100)  # for http-client backend only
                 http_timeout = kwargs.get("http_timeout", 600)  # for http-client backend only
-                server_headers = kwargs.get("server_headers", None)  # for http-client backend only
                 max_retries = kwargs.get("max_retries", 3)  # for http-client backend only
                 retry_backoff_factor = kwargs.get("retry_backoff_factor", 0.5)  # for http-client backend only
                 # 从kwargs中移除这些参数，避免传递给不相关的初始化函数
-                for param in ["batch_size", "max_concurrency", "http_timeout", "server_headers", "max_retries", "retry_backoff_factor"]:
+                for param in ["batch_size", "max_concurrency", "http_timeout", "model_name", "server_headers", "max_retries", "retry_backoff_factor"]:
                     if param in kwargs:
                         del kwargs[param]
                 if backend not in ["http-client"] and not model_path:
@@ -221,6 +235,7 @@ class ModelSingleton:
                         )
                 predictor = MinerUClient(
                     backend=backend,
+                    model_name=model_name,
                     model=model,
                     processor=processor,
                     lmdeploy_engine=lmdeploy_engine,
