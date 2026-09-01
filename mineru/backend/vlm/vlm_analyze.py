@@ -37,7 +37,55 @@ from ...utils.pdfium_guard import (
 from ...utils.models_download_utils import auto_download_and_get_model_root_path
 
 from mineru_vl_utils import MinerUClient
+from mineru_vl_utils.mineru_client import DEFAULT_PROMPTS
 from packaging import version
+
+GENERIC_VLM_PROMPT_ENV = "MINERU_VLM_GENERIC_IMAGE_PROMPT"
+
+# 官方 VLM 经微调后自带 image-analysis token 输出能力，第三方 VLM 没有，
+# 必须在 prompt 里显式约定，否则 post_process 按 tag 提取失败并静默置空。
+# class 固定 figure：pure_table/pure_formula/chart/chemical/flowchart/natural_image
+# 都会触发 post_process 的特殊分支并可能清空 content。
+GENERIC_IMAGE_ANALYSIS_PROMPT = """分析这张图片，严格按下面的格式输出，不要输出任何额外的解释、前言或代码块标记。
+
+<|class_start|>figure<|class_end|>
+<|caption_start|>用一句话概括这张图<|caption_end|>
+<|content_start|>详细描述图中的全部信息：文字、数据、结构、趋势。如果是表格或图表，用 markdown 表格还原数据。<|content_end|>
+
+class 固定填 figure。三个字段都必须出现，且必须闭合。"""
+
+# 表格同理：官方 VLM 微调后原生输出 OTSL，第三方 VLM 只会吐 markdown/HTML，
+# post_process 的 convert_otsl_to_html 找不到 OTSL token 会返回空串且不抛异常。
+TABLE_OTSL_PROMPT = """识别这张表格，只输出 OTSL token 序列，不要输出解释、markdown、HTML 或代码块标记。
+
+OTSL token：
+<fcel>单元格文本 —— 有内容的单元格
+<ecel> —— 空单元格
+<lcel> —— 本格被左侧单元格横向合并占用
+<ucel> —— 本格被上方单元格纵向合并占用
+<xcel> —— 本格同时被左侧和上方合并占用
+<nl> —— 一行结束
+
+规则：
+1. 先数出表格的总列数 N（合并单元格按它跨越的列数计入）。
+2. 每一行必须恰好输出 N 个 cell token，然后以 <nl> 结尾——合并单元格只在左上角写 <fcel>文本，
+   它覆盖的其余位置逐格补 <lcel>（同行右侧）、<ucel>（下方同列）、<xcel>（右下角）。
+3. 单元格文本紧跟 <fcel> 之后，文本内不要换行。
+
+示例（N=3，3 行；首行第 2 格横跨 2 列，首列第 2 格纵跨 2 行）：
+<fcel>期间<fcel>收入<lcel><nl><fcel>Q1<fcel>100<fcel>200<nl><ucel><fcel>300<fcel>400<nl>"""
+
+
+def _resolve_prompts() -> dict[str, str]:
+    """按需为第三方 VLM 覆盖图片/表格 prompt；官方权重保持默认行为。"""
+    if os.getenv(GENERIC_VLM_PROMPT_ENV, "").lower() not in ("1", "true", "yes", "on"):
+        return DEFAULT_PROMPTS
+    return {
+        **DEFAULT_PROMPTS,
+        "image": GENERIC_IMAGE_ANALYSIS_PROMPT,
+        "chart": GENERIC_IMAGE_ANALYSIS_PROMPT,
+        "table": TABLE_OTSL_PROMPT,
+    }
 
 
 def _server_headers_cache_key(server_headers: dict | None):
@@ -235,6 +283,7 @@ class ModelSingleton:
                         )
                 predictor = MinerUClient(
                     backend=backend,
+                    prompts=_resolve_prompts(),
                     model_name=model_name,
                     model=model,
                     processor=processor,

@@ -3,6 +3,9 @@
 <p align="center">
   <img src="https://gcore.jsdelivr.net/gh/opendatalab/MinerU@master/docs/images/MinerU-logo.png" width="300px" style="vertical-align:middle;">
 </p>
+docker build -t mineru-local:latest .
+docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 
 <!-- icon -->
 

@@ -114,13 +114,6 @@ def _validate_parse_effort(effort: str = "medium") -> str:
     return effort
 
 
-def _resolve_effective_image_analysis(effort: str, image_analysis: bool) -> bool:
-    """根据 Hybrid 解析强度计算实际图片分析开关；medium 强制关闭以保持快速路径。"""
-    if effort == "medium":
-        return False
-    return image_analysis
-
-
 def _vlm_type_for_medium_layout_label(label: str | None) -> str | None:
     """将 pipeline layout 标签映射为 mineru-vl-utils 支持的 VLM 抽取类型。"""
     return MEDIUM_EFFORT_LAYOUT_LABEL_TO_VLM_TYPE.get(label)
@@ -900,7 +893,6 @@ def doc_analyze(
         **kwargs,
 ):
     effort = _validate_parse_effort(effort)
-    effective_image_analysis = _resolve_effective_image_analysis(effort, image_analysis)
     client_side_output_generation = bool(
         kwargs.pop("client_side_output_generation", False)
     )
@@ -982,7 +974,7 @@ def doc_analyze(
                                 images_pil_list,
                                 vlm_blocks_list,
                                 not_extract_list=None if _ocr_enable else not_extract_list,
-                                image_analysis=effective_image_analysis,
+                                image_analysis=image_analysis,
                             )
                         optimize_hybrid_formula_number_blocks(window_model_list)
                         if _ocr_enable:
@@ -1007,7 +999,7 @@ def doc_analyze(
                             with predictor_execution_guard(predictor):
                                 window_model_list = predictor.batch_two_step_extract(
                                     images=images_pil_list,
-                                    image_analysis=effective_image_analysis,
+                                    image_analysis=image_analysis,
                                 )
                             _apply_vlm_ocr_det_sidecars_for_window(
                                 images_pil_list,
@@ -1021,7 +1013,7 @@ def doc_analyze(
                                 window_model_list = predictor.batch_two_step_extract(
                                     images=images_pil_list,
                                     not_extract_list=not_extract_list,
-                                    image_analysis=effective_image_analysis,
+                                    image_analysis=image_analysis,
                                 )
                             window_model_list = _process_ocr_and_formulas(
                                 images_pil_list,
@@ -1108,7 +1100,6 @@ async def aio_doc_analyze(
     **kwargs,
 ):
     effort = _validate_parse_effort(effort)
-    effective_image_analysis = _resolve_effective_image_analysis(effort, image_analysis)
     client_side_output_generation = bool(
         kwargs.pop("client_side_output_generation", False)
     )
@@ -1191,7 +1182,7 @@ async def aio_doc_analyze(
                                 images_pil_list,
                                 vlm_blocks_list,
                                 not_extract_list=None if _ocr_enable else not_extract_list,
-                                image_analysis=effective_image_analysis,
+                                image_analysis=image_analysis,
                             )
                         optimize_hybrid_formula_number_blocks(window_model_list)
                         if _ocr_enable:
@@ -1218,7 +1209,7 @@ async def aio_doc_analyze(
                             async with aio_predictor_execution_guard(predictor):
                                 window_model_list = await predictor.aio_batch_two_step_extract(
                                     images=images_pil_list,
-                                    image_analysis=effective_image_analysis,
+                                    image_analysis=image_analysis,
                                 )
                             await asyncio.to_thread(
                                 _apply_vlm_ocr_det_sidecars_for_window,
@@ -1233,7 +1224,7 @@ async def aio_doc_analyze(
                                 window_model_list = await predictor.aio_batch_two_step_extract(
                                     images=images_pil_list,
                                     not_extract_list=not_extract_list,
-                                    image_analysis=effective_image_analysis,
+                                    image_analysis=image_analysis,
                                 )
                             window_model_list = await asyncio.to_thread(
                                 _process_ocr_and_formulas,

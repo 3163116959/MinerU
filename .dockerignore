@@ -1,0 +1,12 @@
+.venv/
+**/__pycache__/
+*.pyc
+.git/
+.idea/
+.vscode/
+mineru_output/
+mineru.egg-info/
+docs/
+demo/
+tests/
+*.ses

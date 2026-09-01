@@ -1,0 +1,43 @@
+services:
+  mineru-api:
+    image: mineru-local:latest
+    build:
+      context: .
+    container_name: mineru-api
+    ports:
+      - "51123:8000"
+    environment:
+      # 用镜像内烤好的官方权重，不联网
+      - MINERU_MODEL_SOURCE=local
+      - MINERU_DEVICE_MODE=cpu
+      - MINERU_LOG_LEVEL=INFO
+      # 排查 layout 解析问题时改为 1，会打印 VLM 原始输出
+      - MINERU_VL_DEBUG_ENABLE=0
+      # 接第三方 VLM 时开启：显式约定 image-analysis token 与表格 OTSL 格式。
+      # 换回官方权重必须关掉，否则会干扰其微调后的原生输出。
+      - MINERU_VLM_GENERIC_IMAGE_PROMPT=1
+    volumes:
+      - ./mineru_output:/app/output
+    command: >
+      mineru-api
+      --host 0.0.0.0
+      --port 8000
+      --enable-vlm-preload true
+      --allow-public-http-client
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health")
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # CPU 下 1.2B 预加载慢，给足冷启动时间
+      start_period: 600s
+    networks:
+      - mineru-network
+
+networks:
+  mineru-network:
+    driver: bridge

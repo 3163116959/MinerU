@@ -57,3 +57,7 @@ _build/
 
 
 output/
+
+.dsh
+
+mineru_output
