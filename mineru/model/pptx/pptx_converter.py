@@ -760,7 +760,9 @@ class PptxConverter:
         pil_image = Image.open(BytesIO(image_bytes))
 
         if is_vector_image(pil_image):
-            return serialize_vector_image_with_placeholder(pil_image)
+            return serialize_vector_image_with_placeholder(
+                pil_image, image_bytes=image_bytes
+            )
 
         if pil_image.mode == "RGB":
             pil_image.load()

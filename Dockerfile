@@ -94,6 +94,21 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# LibreOffice：WMF/EMF 矢量图在非 Windows 上 Pillow 无渲染后端，
+# office_image.rasterize_vector_image 调 soffice 转 PNG，缺它则退占位图。
+# 单独成层且放在 COPY 之前：改业务代码不会重建这 ~400MB 的系统层。
+# apt 缓存挂载需先删 docker-clean，否则 apt 装完即清空缓存目录。
+# 时区 UTC+8、编码 UTF-8 一并在此固化（C.UTF-8 是 glibc 内建，无需 locales 包）。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libreoffice-draw \
+        tzdata && \
+    ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone
+
 # 三条 COPY = 三层，按变动频率升序：权重（几乎不变）→ 依赖 → 业务代码。
 # 依赖层取自 deps（不含项目代码），改代码时 digest 不变，pull 只重传几 MB 的 /opt/app。
 COPY --from=weights /opt/models-export /opt/models
@@ -103,6 +118,10 @@ COPY --from=build /opt/app /opt/app
 ENV PATH="/opt/venv/bin:/opt/app/bin:$PATH" \
     PYTHONPATH=/opt/app \
     PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONIOENCODING=utf-8 \
     MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json \
     MINERU_MODEL_SOURCE=local \
     MINERU_DEVICE_MODE=cpu

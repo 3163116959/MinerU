@@ -332,7 +332,11 @@ class XlsxConverter:
     def _serialize_sheet_image(image: XlsImage) -> str:
         pil_image = Image.open(image.ref)  # type: ignore[arg-type]
         if is_vector_image(pil_image):
-            return serialize_vector_image_with_placeholder(pil_image)
+            # ref 为文件对象时才能拿到原始字节交给 LibreOffice，否则只能退占位图
+            image_bytes = image.ref.getvalue() if hasattr(image.ref, "getvalue") else None
+            return serialize_vector_image_with_placeholder(
+                pil_image, image_bytes=image_bytes
+            )
 
         if pil_image.mode != "RGB":
             return image_to_b64str(pil_image, image_format="PNG")
@@ -1351,10 +1355,13 @@ class XlsxConverter:
             return ""
 
         try:
-            with self.zf.open(zip_target_path) as image_file:
+            image_bytes = self.zf.read(zip_target_path)
+            with BytesIO(image_bytes) as image_file:
                 pil_image = Image.open(image_file)
                 if is_vector_image(pil_image):
-                    img_base64 = serialize_vector_image_with_placeholder(pil_image)
+                    img_base64 = serialize_vector_image_with_placeholder(
+                        pil_image, image_bytes=image_bytes
+                    )
                     return rf'<img src="{img_base64}" />'
 
                 pil_image.load()
