@@ -3,7 +3,9 @@
 # CPU-only 基础镜像。不用 vllm/vllm-openai：
 # engine_utils._select_linux_engine() 只要 import vllm 成功就会选 vllm，
 # 而无 CUDA 设备时 vllm 初始化必失败 → 保持 vllm 未安装，自动回落 transformers。
-ARG BASE_IMAGE=python:3.12-slim-bookworm
+# 基础镜像用 trixie（Debian 13）而非 bookworm：LibreOffice 从 7.4.7 跳到 25.2.3，
+# EMF/WMF 导入与渲染差了三年的修复，直接决定 rasterize_vector_image 的成图质量。
+ARG BASE_IMAGE=python:3.12-slim-trixie
 ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
 
@@ -96,7 +98,7 @@ RUN apt-get update && \
 
 # LibreOffice：WMF/EMF 矢量图在非 Windows 上 Pillow 无渲染后端，
 # office_image.rasterize_vector_image 调 soffice 转 PNG，缺它则退占位图。
-# 单独成层且放在 COPY 之前：改业务代码不会重建这 ~400MB 的系统层。
+# 单独成层且放在 COPY 之前：改业务代码不会重建这 ~800MB 的系统层。
 # apt 缓存挂载需先删 docker-clean，否则 apt 装完即清空缓存目录。
 # 时区 UTC+8、编码 UTF-8 一并在此固化（C.UTF-8 是 glibc 内建，无需 locales 包）。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
