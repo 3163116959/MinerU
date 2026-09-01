@@ -6,7 +6,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from loguru import logger
 
@@ -25,6 +25,10 @@ from mineru.backend.vlm.vlm_middle_json_mkcontent import union_make as vlm_union
 from mineru.backend.office.office_middle_json_mkcontent import union_make as office_union_make
 from mineru.backend.vlm.vlm_analyze import doc_analyze as vlm_doc_analyze
 from mineru.backend.vlm.vlm_analyze import aio_doc_analyze as aio_vlm_doc_analyze
+from mineru.backend.office.image_analyze import (
+    aio_analyze_office_images,
+    analyze_office_images,
+)
 from mineru.backend.office.pptx_analyze import office_pptx_analyze
 from mineru.backend.office.xlsx_analyze import office_xlsx_analyze
 from mineru.backend.office.docx_analyze import office_docx_analyze
@@ -615,54 +619,86 @@ async def _async_process_hybrid(
         )
 
 
-def _process_office_doc(
+class _OfficeParsed(NamedTuple):
+    index: int
+    file_name: str
+    file_bytes: bytes
+    file_suffix: str
+    local_image_dir: str
+    local_md_dir: str
+    md_writer: FileBasedDataWriter
+    middle_json: dict
+    infer_result: list
+
+
+def _parse_office_docs(
         output_dir,
         pdf_file_names: list[str],
         pdf_bytes_list: list[bytes],
+) -> list[_OfficeParsed]:
+    """只做解析，不落盘：图片分析要在写出 md/content_list 之前插入 caption。"""
+    parsed: list[_OfficeParsed] = []
+    for i, file_bytes in enumerate(pdf_bytes_list):
+        file_suffix = guess_suffix_by_bytes(file_bytes)
+        if file_suffix not in office_suffixes:
+            continue
+
+        pdf_file_name = pdf_file_names[i]
+        local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, "office")
+        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
+
+        if file_suffix in docx_suffixes:
+            office_analyze = office_docx_analyze
+        elif file_suffix in pptx_suffixes:
+            office_analyze = office_pptx_analyze
+        elif file_suffix in xlsx_suffixes:
+            office_analyze = office_xlsx_analyze
+        else:
+            raise ValueError(f"Unsupported office suffix: {file_suffix}")
+
+        middle_json, infer_result = office_analyze(
+            file_bytes,
+            image_writer=image_writer,
+        )
+        parsed.append(
+            _OfficeParsed(
+                i, pdf_file_name, file_bytes, file_suffix,
+                local_image_dir, local_md_dir, md_writer, middle_json, infer_result,
+            )
+        )
+    return parsed
+
+
+def _write_office_outputs(
+        parsed_list: list[_OfficeParsed],
         f_dump_md=True,
         f_dump_middle_json=True,
         f_dump_model_output=True,
         f_dump_orig_file=True,
         f_dump_content_list=True,
         f_make_md_mode=MakeMode.MM_MD,
-):
-    need_remove_index = []
-    for i, file_bytes in enumerate(pdf_bytes_list):
-        pdf_file_name = pdf_file_names[i]
-        file_suffix = guess_suffix_by_bytes(file_bytes)
-        if file_suffix in office_suffixes:
+) -> list[int]:
+    for item in parsed_list:
+        _process_output(
+            item.middle_json["pdf_info"], item.file_bytes, item.file_name,
+            item.local_md_dir, item.local_image_dir, item.md_writer,
+            False, False, f_dump_orig_file,
+            f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
+            f_make_md_mode, item.middle_json, item.infer_result,
+            process_mode=item.file_suffix,
+        )
+    return [item.index for item in parsed_list]
 
-            need_remove_index.append(i)
 
-            local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, f"office")
-            image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
-
-            if file_suffix in docx_suffixes:
-                office_analyze = office_docx_analyze
-            elif file_suffix in pptx_suffixes:
-                office_analyze = office_pptx_analyze
-            elif file_suffix in xlsx_suffixes:
-                office_analyze = office_xlsx_analyze
-            else:
-                raise ValueError(f"Unsupported office suffix: {file_suffix}")
-
-            middle_json, infer_result = office_analyze(
-                file_bytes,
-                image_writer=image_writer,
-            )
-
-            f_draw_layout_bbox = False
-            f_draw_span_bbox = False
-            pdf_info = middle_json["pdf_info"]
-
-            _process_output(
-                pdf_info, file_bytes, pdf_file_name, local_md_dir, local_image_dir,
-                md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_file,
-                f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-                f_make_md_mode, middle_json, infer_result, process_mode=file_suffix
-            )
-
-    return need_remove_index
+def _resolve_office_vlm_backend(backend: str, is_async: bool) -> str | None:
+    """office 没有页图，只能借 VLM 的单图分析补图片语义；pipeline 无 VLM 则不做。"""
+    for prefix in ("vlm-", "hybrid-"):
+        if backend.startswith(prefix):
+            vlm_backend = backend[len(prefix):]
+            if vlm_backend == "engine":
+                return get_vlm_engine(inference_engine="auto", is_async=is_async)
+            return vlm_backend
+    return None
 
 
 def do_parse(
@@ -691,10 +727,21 @@ def do_parse(
         **kwargs,
 ):
     backend = normalize_backend(backend)
-    need_remove_index = _process_office_doc(
-        output_dir,
-        pdf_file_names=pdf_file_names,
-        pdf_bytes_list=pdf_bytes_list,
+    office_parsed = _parse_office_docs(output_dir, pdf_file_names, pdf_bytes_list)
+    office_vlm_backend = (
+        _resolve_office_vlm_backend(backend, is_async=False) if image_analysis else None
+    )
+    if office_vlm_backend:
+        for item in office_parsed:
+            analyze_office_images(
+                item.middle_json,
+                item.local_image_dir,
+                vlm_backend=office_vlm_backend,
+                server_url=server_url,
+                **kwargs,
+            )
+    need_remove_index = _write_office_outputs(
+        office_parsed,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
         f_dump_model_output=f_dump_model_output,
@@ -784,11 +831,25 @@ async def aio_do_parse(
 ):
     backend = normalize_backend(backend)
     # Office 解析是同步且可能耗时的操作，异步入口需要放到线程中避免阻塞事件循环。
+    office_parsed = await asyncio.to_thread(
+        _parse_office_docs, output_dir, pdf_file_names, pdf_bytes_list
+    )
+    office_vlm_backend = (
+        _resolve_office_vlm_backend(backend, is_async=True) if image_analysis else None
+    )
+    if office_vlm_backend:
+        # 图片分析必须留在事件循环里：async 引擎不支持同步 predict。
+        for item in office_parsed:
+            await aio_analyze_office_images(
+                item.middle_json,
+                item.local_image_dir,
+                vlm_backend=office_vlm_backend,
+                server_url=server_url,
+                **kwargs,
+            )
     need_remove_index = await asyncio.to_thread(
-        _process_office_doc,
-        output_dir,
-        pdf_file_names=pdf_file_names,
-        pdf_bytes_list=pdf_bytes_list,
+        _write_office_outputs,
+        office_parsed,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
         f_dump_model_output=f_dump_model_output,
