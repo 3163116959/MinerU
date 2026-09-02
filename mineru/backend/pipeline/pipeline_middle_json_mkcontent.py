@@ -197,8 +197,11 @@ def get_visual_block_separator(prev_segment_kind, current_segment_kind):
         # Raw HTML blocks need a blank line after them, otherwise the following
         # markdown text is still treated as part of the HTML block.
         return '\n\n'
-    if prev_segment_kind == 'details_block' or current_segment_kind == 'details_block':
+    if prev_segment_kind == 'details_block':
+        # details 块内没有空行，必须在其后补空行，否则后续 markdown 会被吞进 html 块
         return '\n\n'
+    if current_segment_kind == 'details_block':
+        return '\n'
     if current_segment_kind == 'html_block':
         return '\n'
     return '  \n'
@@ -268,9 +271,10 @@ def _build_visual_details_block(content, summary):
     if not normalized_content:
         return ''
 
+    # 块内不留空行：下游按空行切分 markdown 时，图片与识别内容才不会被切散
     return (
         "<details>\n"
-        f"<summary>{summary}</summary>\n\n"
+        f"<summary>{summary}</summary>\n"
         f"{normalized_content}\n"
         "</details>"
     )

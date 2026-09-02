@@ -108,9 +108,10 @@ def _build_visual_details_block(content, span_type, summary_override=''):
     else:
         summary = summary_override or "image content"
 
+    # 块内不留空行：下游按空行切分 markdown 时，图片与识别内容才不会被切散
     return (
         "<details>\n"
-        f"<summary>{summary}</summary>\n\n"
+        f"<summary>{summary}</summary>\n"
         f"{content}\n"
         "</details>"
     )
@@ -128,7 +129,7 @@ def _build_visual_body_segments(image_path, content, img_buket_path, span_type, 
         summary_override=summary_override,
     )
     if details_block:
-        body_segments.append((details_block, 'html_block'))
+        body_segments.append((details_block, 'details_block'))
 
     return body_segments
 
@@ -244,6 +245,11 @@ def _render_visual_block_segments(block, para_block, img_buket_path='', table_en
 
 
 def _get_visual_block_separator(prev_segment_kind, current_segment_kind):
+    if prev_segment_kind == 'details_block':
+        # details 块内没有空行，必须在其后补空行，否则后续 markdown 会被吞进 html 块
+        return '\n\n'
+    if current_segment_kind == 'details_block':
+        return '\n'
     if prev_segment_kind == 'html_block' or current_segment_kind == 'html_block':
         return '\n\n'
     return '  \n'
