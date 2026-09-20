@@ -2,9 +2,10 @@
 
 # GPU 版：镜像自带 CUDA torch + vllm，
 # engine_utils._select_linux_engine() 会自动选中 vllm-engine。
-# 沿用你已验证可拉取的镜像 tag。
-ARG BASE_IMAGE=docker.m.daocloud.io/vllm/vllm-openai:v0.21.0
-ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+# 锁 digest 而非只锁 tag：tag 被上游重推时会让全阶段缓存失效，
+# 升级时手动换 digest（docker buildx imagetools inspect <tag> 取 Digest）。
+ARG BASE_IMAGE=docker.m.daocloud.io/vllm/vllm-openai:v0.21.0@sha256:a230095847e93bd4df9888b33dab956fa9504537b828a23657d2b26fed57b5c9
+ARG PIP_INDEX=https://repo.huaweicloud.com/repository/pypi/simple
 ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
 # 基础镜像被 vllm 锁死在 Ubuntu 22.04（vllm<0.22.0 是 MinerU 与 mineru-vl-utils
 # 双重约束，v0.21.0 已是上限），发行版只给到 LibreOffice 7.3.7。
@@ -12,16 +13,12 @@ ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
 ARG LIBREOFFICE_VERSION=26.2.5
 ARG LIBREOFFICE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/libreoffice
 
-# ========== deps：系统依赖 + 外部 Python 依赖，只由 pyproject.toml 决定 ==========
-FROM ${BASE_IMAGE} AS deps
-ARG PIP_INDEX
+# ========== system：apt 源 + 系统库 + LibreOffice，位于 Python 依赖层之下 ==========
+# 必须在 deps 之前：runtime 是 deps 的后代，若 LibreOffice 装在 deps 之上，
+# 改一次 pyproject.toml 就会连带重建这 ~739MB 的 LO 层。
+FROM ${BASE_IMAGE} AS system
 ARG APT_MIRROR
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_DEFAULT_INDEX=${PIP_INDEX} \
-    PIP_INDEX_URL=${PIP_INDEX} \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1
 
 # apt 换国内源：只替换主机名，仓库路径（/ubuntu、/ubuntu-ports）原样保留，
 # 故 amd64 与 arm64 通用。用 http：apt 靠 GPG 验签，不依赖 TLS。
@@ -36,75 +33,22 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
         done; \
     fi
 
-# 系统依赖：opencv 需要 libgl1 + libglib2.0-0，CJK 渲染需要 noto 字体
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        fonts-noto-core \
-        fonts-noto-cjk \
-        fontconfig \
-        libgl1 \
-        libglib2.0-0 && \
-    fc-cache -f && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN pip install uv --break-system-packages
-
-WORKDIR /src
-# 只复制依赖清单 → 改业务代码不动这层（这层含 CUDA 生态，最贵）
-COPY pyproject.toml ./
-# -r pyproject.toml 只读依赖表，不构建项目，等价于 uv sync --no-install-project。
-# 不带 [vllm]：镜像内 vllm/torch 已满足版本约束，uv 不会重装 → 保住 CUDA 绑定。
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --break-system-packages -r pyproject.toml --extra core
-
-# ========== weights：烤入官方权重，与业务代码无依赖关系 ==========
-# 挂在 deps 上而非 build 上：只复制下载器的 import 闭包（7 个文件），
-# 改业务代码这层结构上就不会失效。上游给这些模块加新 import → 这里直接 ImportError，
-# 不静默降级。cache mount 只兜住依赖清单变动这类少数场景。
-# 缓存路径与运行时路径同为 /opt/models → mineru.json 记录的绝对路径无需改写。
-FROM deps AS weights
-COPY mineru/__init__.py ./mineru/
-COPY mineru/utils/__init__.py \
-     mineru/utils/enum_class.py \
-     mineru/utils/models_download_utils.py \
-     mineru/utils/config_reader.py \
-     ./mineru/utils/
-COPY mineru/cli/__init__.py mineru/cli/models_download.py ./mineru/cli/
-ENV PYTHONPATH=/src \
-    MODELSCOPE_CACHE=/opt/models \
-    MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json
-# rm mineru.json：MinerU 的"配置里有路径且目录存在就跳过下载"是目录级判断
-# （models_download_utils.py:151），断点续传留下的半截文件会被当成下载完成。
-# 删掉配置 → 每次都交给 modelscope 自己校验补齐。
-# 再用 .incomplete 断言兜底：宁可构建失败，也不把残缺权重烤进镜像。
-RUN --mount=type=cache,target=/opt/models,id=mineru-models,sharing=locked \
-    rm -f /opt/models/mineru.json \
-    && python3 -m mineru.cli.models_download -s modelscope -m all \
-    && ! find /opt/models -name '*.incomplete' | grep -q . \
-    && cp -a /opt/models /opt/models-export
-
-# ========== build：项目打成 wheel，装到 site-packages 之外的 /opt/app ==========
-FROM deps AS build
-COPY . /src
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv build --wheel --out-dir /src/dist \
-    && uv pip install --python "$(command -v python3)" --no-deps --target /opt/app /src/dist/*.whl
-
-# ========== runtime ==========
-FROM deps
-
-# LibreOffice 的运行时系统库 + 时区。TDF 的 .deb 不声明这些依赖（dpkg -i 不做解析），
+# 前半是 MinerU 自身所需：opencv 要 libgl1 + libglib2.0-0，CJK 渲染要 noto 字体；
+# 后半是 LibreOffice 的运行时系统库 —— TDF 的 .deb 不声明依赖（dpkg -i 不做解析），
 # 缺任何一个都表现为 soffice 启动即 "error while loading shared libraries"。
-# 放在 runtime 而非 deps：deps 含 CUDA 依赖层最贵，加这层不触发它和 weights 重建；
-# 又放在 COPY 之前，改业务代码不会重建这个系统层。
+# 一段 apt 装完：拆成两段会各跑一次 apt-get update。
 # apt 缓存挂载需先删 docker-clean，否则 apt 装完即清空缓存目录。
-# 时区 UTC+8、编码 UTF-8 一并在此固化（C.UTF-8 是 glibc 内建，无需 locales 包）。
+# 时区 UTC+8 一并在此固化。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        fonts-noto-core \
+        fonts-noto-cjk \
+        fontconfig \
+        libgl1 \
+        libglib2.0-0 \
         ca-certificates \
         curl \
         libcairo2 \
@@ -118,6 +62,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libxinerama1 \
         libxrandr2 \
         tzdata && \
+    fc-cache -f && \
     ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone
 
@@ -146,6 +91,69 @@ RUN --mount=type=cache,target=/var/cache/libreoffice,sharing=locked \
     rm -rf /tmp/lo; \
     ln -sf "/opt/libreoffice${LIBREOFFICE_VERSION%.*}/program/soffice" /usr/local/bin/soffice; \
     soffice --version
+
+# ========== deps：外部 Python 依赖，只由 pyproject.toml 决定 ==========
+FROM system AS deps
+ARG PIP_INDEX
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_DEFAULT_INDEX=${PIP_INDEX} \
+    PIP_INDEX_URL=${PIP_INDEX} \
+    PIP_NO_CACHE_DIR=1
+
+RUN pip install uv --break-system-packages
+
+WORKDIR /src
+# 只复制依赖清单 → 改业务代码不动这层（这层含 CUDA 生态，最贵）
+COPY pyproject.toml ./
+# -r pyproject.toml 只读依赖表，不构建项目，等价于 uv sync --no-install-project。
+# 不带 [vllm]：镜像内 vllm/torch 已满足版本约束，uv 不会重装 → 保住 CUDA 绑定。
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --break-system-packages -r pyproject.toml --extra core
+
+# ========== weights：烤入官方权重，与依赖清单、业务代码均无关 ==========
+# 挂在基础镜像上而非 deps：否则改一次 pyproject.toml 就要重跑一遍
+# models_download 的网络校验和 cp -a 的几 GB 拷贝。这里只装下载器 import
+# 闭包用到的包，上游给这些模块加新 import → 这里直接 ImportError，不静默降级。
+# 缓存路径与运行时路径同为 /opt/models → mineru.json 记录的绝对路径无需改写。
+FROM ${BASE_IMAGE} AS weights
+ARG PIP_INDEX
+ENV PIP_INDEX_URL=${PIP_INDEX} \
+    PIP_NO_CACHE_DIR=1
+RUN pip install --break-system-packages click loguru requests huggingface-hub modelscope
+
+WORKDIR /src
+COPY mineru/__init__.py ./mineru/
+COPY mineru/utils/__init__.py \
+     mineru/utils/enum_class.py \
+     mineru/utils/models_download_utils.py \
+     mineru/utils/config_reader.py \
+     ./mineru/utils/
+COPY mineru/cli/__init__.py mineru/cli/models_download.py ./mineru/cli/
+ENV PYTHONPATH=/src \
+    MODELSCOPE_CACHE=/opt/models \
+    MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json
+# rm mineru.json：MinerU 的"配置里有路径且目录存在就跳过下载"是目录级判断
+# （models_download_utils.py:151），断点续传留下的半截文件会被当成下载完成。
+# 删掉配置 → 每次都交给 modelscope 自己校验补齐。
+# 再用 .incomplete 断言兜底：宁可构建失败，也不把残缺权重烤进镜像。
+RUN --mount=type=cache,target=/opt/models,id=mineru-models,sharing=locked \
+    rm -f /opt/models/mineru.json \
+    && python3 -m mineru.cli.models_download -s modelscope -m all \
+    && ! find /opt/models -name '*.incomplete' | grep -q . \
+    && cp -a /opt/models /opt/models-export
+
+# ========== build：项目打成 wheel，装到 site-packages 之外的 /opt/app ==========
+FROM deps AS build
+COPY . /src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv build --wheel --out-dir /src/dist \
+    && uv pip install --python "$(command -v python3)" --no-deps --target /opt/app /src/dist/*.whl
+
+# ========== runtime ==========
+# 从 deps 起：Python 包装在系统 site-packages，无法像 CPU 版那样 COPY 一个 venv。
+# 这一阶段自身不再有 RUN 层，只剩两条 COPY。
+FROM deps
 
 # 两条 COPY = 两层：权重 / 业务代码，依赖层直接复用 deps，改代码只重传几 MB
 COPY --from=weights /opt/models-export /opt/models
