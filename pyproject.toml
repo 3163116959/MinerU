@@ -60,6 +60,7 @@ dependencies = [
     "fastapi",
     "python-multipart",
     "uvicorn",
+    "firecrawl-anydoc>=0.2.4,<1",
 ]
 
 [project.optional-dependencies]

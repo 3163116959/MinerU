@@ -15,6 +15,7 @@ from mineru.cli.backend_options import (
     normalize_backend,
     validate_effort,
 )
+from mineru.cli.output_paths import build_parse_dir
 from mineru.data.data_reader_writer import FileBasedDataWriter
 from mineru.utils.draw_bbox import draw_layout_bbox, draw_span_bbox
 from mineru.utils.engine_utils import get_vlm_engine
@@ -29,6 +30,9 @@ from mineru.backend.office.image_analyze import (
     aio_analyze_office_images,
     analyze_office_images,
 )
+from mineru.backend.anydoc.anydoc_analyze import AnydocConvertError, anydoc_analyze
+from mineru.backend.anydoc.ooxml_probe import ooxml_needs_native_parser
+from mineru.backend.anydoc.pdf_route import can_parse_pdf_with_anydoc
 from mineru.backend.office.pptx_analyze import office_pptx_analyze
 from mineru.backend.office.xlsx_analyze import office_xlsx_analyze
 from mineru.backend.office.docx_analyze import office_docx_analyze
@@ -48,7 +52,10 @@ image_suffixes = ["png", "jpeg", "jp2", "webp", "gif", "bmp", "jpg", "tiff"]
 docx_suffixes = ["docx"]
 pptx_suffixes = ["pptx"]
 xlsx_suffixes = ["xlsx"]
-office_suffixes = docx_suffixes + pptx_suffixes + xlsx_suffixes
+ooxml_suffixes = docx_suffixes + pptx_suffixes + xlsx_suffixes
+# 只有 anydoc 能解析的文档格式：MinerU 没有对应的原生解析器。
+anydoc_only_suffixes = ["doc", "ppt", "xls", "odt", "ods", "odp", "rtf", "epub", "csv"]
+office_suffixes = ooxml_suffixes + anydoc_only_suffixes
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Maximum UTF-8 byte length allowed for task stems used in filenames.
@@ -278,13 +285,14 @@ def _process_output(
         middle_json,
         model_output=None,
         process_mode="vlm",
+        orig_file_suffix="pdf",
 ):
     from mineru.backend.pipeline.pipeline_middle_json_mkcontent import union_make as pipeline_union_make
     if process_mode == "pipeline":
         make_func = pipeline_union_make
     elif process_mode == "vlm":
         make_func = vlm_union_make
-    elif process_mode in office_suffixes:
+    elif process_mode == "office":
         make_func = office_union_make
     else:
         raise Exception(f"Unknown process_mode: {process_mode}")
@@ -302,16 +310,10 @@ def _process_output(
             logger.warning(f"Skipping span bbox visualization for {pdf_file_name}: {exc}")
 
     if f_dump_orig_pdf:
-        if process_mode in ["pipeline", "vlm"]:
-            md_writer.write(
-                f"{pdf_file_name}_origin.pdf",
-                pdf_bytes,
-            )
-        elif process_mode in office_suffixes:
-            md_writer.write(
-                f"{pdf_file_name}_origin.{process_mode}",
-                pdf_bytes,
-            )
+        md_writer.write(
+            f"{pdf_file_name}_origin.{orig_file_suffix}",
+            pdf_bytes,
+        )
 
     image_dir = str(os.path.basename(local_image_dir))
 
@@ -619,7 +621,7 @@ async def _async_process_hybrid(
         )
 
 
-class _OfficeParsed(NamedTuple):
+class _ParsedDoc(NamedTuple):
     index: int
     file_name: str
     file_bytes: bytes
@@ -631,13 +633,40 @@ class _OfficeParsed(NamedTuple):
     infer_result: list
 
 
+def _native_office_analyze(file_suffix: str):
+    """OOXML 的原生解析器，anydoc 解析失败时兜底，其余格式没有原生实现。"""
+    if file_suffix in docx_suffixes:
+        return office_docx_analyze
+    if file_suffix in pptx_suffixes:
+        return office_pptx_analyze
+    if file_suffix in xlsx_suffixes:
+        return office_xlsx_analyze
+    return None
+
+
+def _analyze_office_doc(file_bytes: bytes, file_suffix: str, image_writer):
+    """office 文档默认走 anydoc；含 chart/目录域的 OOXML 和 anydoc 解析失败的走原生解析器。"""
+    native_analyze = _native_office_analyze(file_suffix)
+    if native_analyze is not None and ooxml_needs_native_parser(file_bytes):
+        logger.debug(f"{file_suffix} contains chart or TOC field, using native parser")
+        return native_analyze(file_bytes, image_writer=image_writer)
+
+    try:
+        return anydoc_analyze(file_bytes, file_suffix, image_writer=image_writer)
+    except AnydocConvertError as exc:
+        if native_analyze is None:
+            raise
+        logger.warning(f"anydoc failed on {file_suffix} ({exc}), falling back to native parser")
+        return native_analyze(file_bytes, image_writer=image_writer)
+
+
 def _parse_office_docs(
         output_dir,
         pdf_file_names: list[str],
         pdf_bytes_list: list[bytes],
-) -> list[_OfficeParsed]:
+) -> list[_ParsedDoc]:
     """只做解析，不落盘：图片分析要在写出 md/content_list 之前插入 caption。"""
-    parsed: list[_OfficeParsed] = []
+    parsed: list[_ParsedDoc] = []
     for i, file_bytes in enumerate(pdf_bytes_list):
         file_suffix = guess_suffix_by_bytes(file_bytes)
         if file_suffix not in office_suffixes:
@@ -647,21 +676,13 @@ def _parse_office_docs(
         local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, "office")
         image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
 
-        if file_suffix in docx_suffixes:
-            office_analyze = office_docx_analyze
-        elif file_suffix in pptx_suffixes:
-            office_analyze = office_pptx_analyze
-        elif file_suffix in xlsx_suffixes:
-            office_analyze = office_xlsx_analyze
-        else:
-            raise ValueError(f"Unsupported office suffix: {file_suffix}")
-
-        middle_json, infer_result = office_analyze(
+        middle_json, infer_result = _analyze_office_doc(
             file_bytes,
-            image_writer=image_writer,
+            file_suffix,
+            image_writer,
         )
         parsed.append(
-            _OfficeParsed(
+            _ParsedDoc(
                 i, pdf_file_name, file_bytes, file_suffix,
                 local_image_dir, local_md_dir, md_writer, middle_json, infer_result,
             )
@@ -669,8 +690,40 @@ def _parse_office_docs(
     return parsed
 
 
-def _write_office_outputs(
-        parsed_list: list[_OfficeParsed],
+def _parse_anydoc_pdfs(
+        output_dir,
+        pdf_file_names: list[str],
+        pdf_bytes_list: list[bytes],
+        backend: str,
+        parse_method: str,
+        start_page_id: int,
+        end_page_id,
+) -> list[_ParsedDoc]:
+    """纯文本 PDF 走 anydoc 快路径；扫描件、图文混合和分页请求仍交给 MinerU。"""
+    parsed: list[_ParsedDoc] = []
+    for i, file_bytes in enumerate(pdf_bytes_list):
+        if guess_suffix_by_bytes(file_bytes) not in pdf_suffixes:
+            continue
+        if not can_parse_pdf_with_anydoc(file_bytes, start_page_id, end_page_id):
+            continue
+
+        pdf_file_name = pdf_file_names[i]
+        parse_dir_name = build_parse_dir(output_dir, pdf_file_name, backend, parse_method).name
+        local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_dir_name)
+        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
+
+        middle_json, infer_result = anydoc_analyze(file_bytes, "pdf", image_writer=image_writer)
+        parsed.append(
+            _ParsedDoc(
+                i, pdf_file_name, file_bytes, "pdf",
+                local_image_dir, local_md_dir, md_writer, middle_json, infer_result,
+            )
+        )
+    return parsed
+
+
+def _write_parsed_outputs(
+        parsed_list: list[_ParsedDoc],
         f_dump_md=True,
         f_dump_middle_json=True,
         f_dump_model_output=True,
@@ -685,7 +738,7 @@ def _write_office_outputs(
             False, False, f_dump_orig_file,
             f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
             f_make_md_mode, item.middle_json, item.infer_result,
-            process_mode=item.file_suffix,
+            process_mode="office", orig_file_suffix=item.file_suffix,
         )
     return [item.index for item in parsed_list]
 
@@ -740,8 +793,12 @@ def do_parse(
                 server_url=server_url,
                 **kwargs,
             )
-    need_remove_index = _write_office_outputs(
-        office_parsed,
+    anydoc_pdf_parsed = _parse_anydoc_pdfs(
+        output_dir, pdf_file_names, pdf_bytes_list, backend, parse_method,
+        start_page_id, end_page_id,
+    )
+    need_remove_index = _write_parsed_outputs(
+        office_parsed + anydoc_pdf_parsed,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
         f_dump_model_output=f_dump_model_output,
@@ -847,9 +904,13 @@ async def aio_do_parse(
                 server_url=server_url,
                 **kwargs,
             )
+    anydoc_pdf_parsed = await asyncio.to_thread(
+        _parse_anydoc_pdfs, output_dir, pdf_file_names, pdf_bytes_list, backend,
+        parse_method, start_page_id, end_page_id,
+    )
     need_remove_index = await asyncio.to_thread(
-        _write_office_outputs,
-        office_parsed,
+        _write_parsed_outputs,
+        office_parsed + anydoc_pdf_parsed,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
         f_dump_model_output=f_dump_model_output,
