@@ -9,9 +9,6 @@ from mineru.backend.anydoc.document_to_blocks import document_to_page_blocks
 from mineru.backend.anydoc.markdown_to_blocks import markdown_to_page_blocks
 from mineru.backend.office.model_output_to_middle_json import result_to_middle_json
 
-AnydocConvertError = anydoc.ConvertError
-
-
 def anydoc_format(file_suffix: str) -> str | None:
     """把 MinerU 的文件后缀映射为 anydoc 格式名，不支持时返回 None。"""
     return anydoc.format_from_extension(f".{file_suffix}")

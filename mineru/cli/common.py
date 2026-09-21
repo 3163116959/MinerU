@@ -30,12 +30,8 @@ from mineru.backend.office.image_analyze import (
     aio_analyze_office_images,
     analyze_office_images,
 )
-from mineru.backend.anydoc.anydoc_analyze import AnydocConvertError, anydoc_analyze
-from mineru.backend.anydoc.ooxml_probe import ooxml_needs_native_parser
+from mineru.backend.anydoc.anydoc_analyze import anydoc_analyze
 from mineru.backend.anydoc.pdf_route import can_parse_pdf_with_anydoc
-from mineru.backend.office.pptx_analyze import office_pptx_analyze
-from mineru.backend.office.xlsx_analyze import office_xlsx_analyze
-from mineru.backend.office.docx_analyze import office_docx_analyze
 from mineru.utils.pdfium_guard import (
     get_loadable_pdfium_page_indices,
     rewrite_pdf_bytes_with_pdfium,
@@ -49,13 +45,11 @@ if os.getenv("MINERU_LMDEPLOY_DEVICE", "") == "maca":
 
 pdf_suffixes = ["pdf"]
 image_suffixes = ["png", "jpeg", "jp2", "webp", "gif", "bmp", "jpg", "tiff"]
-docx_suffixes = ["docx"]
-pptx_suffixes = ["pptx"]
-xlsx_suffixes = ["xlsx"]
-ooxml_suffixes = docx_suffixes + pptx_suffixes + xlsx_suffixes
-# 只有 anydoc 能解析的文档格式：MinerU 没有对应的原生解析器。
-anydoc_only_suffixes = ["doc", "ppt", "xls", "odt", "ods", "odp", "rtf", "epub", "csv"]
-office_suffixes = ooxml_suffixes + anydoc_only_suffixes
+# office 文档一律由 anydoc 解析。
+office_suffixes = [
+    "docx", "pptx", "xlsx", "doc", "ppt", "xls",
+    "odt", "ods", "odp", "rtf", "epub", "csv",
+]
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Maximum UTF-8 byte length allowed for task stems used in filenames.
@@ -633,33 +627,6 @@ class _ParsedDoc(NamedTuple):
     infer_result: list
 
 
-def _native_office_analyze(file_suffix: str):
-    """OOXML 的原生解析器，anydoc 解析失败时兜底，其余格式没有原生实现。"""
-    if file_suffix in docx_suffixes:
-        return office_docx_analyze
-    if file_suffix in pptx_suffixes:
-        return office_pptx_analyze
-    if file_suffix in xlsx_suffixes:
-        return office_xlsx_analyze
-    return None
-
-
-def _analyze_office_doc(file_bytes: bytes, file_suffix: str, image_writer):
-    """office 文档默认走 anydoc；含 chart/目录域的 OOXML 和 anydoc 解析失败的走原生解析器。"""
-    native_analyze = _native_office_analyze(file_suffix)
-    if native_analyze is not None and ooxml_needs_native_parser(file_bytes):
-        logger.debug(f"{file_suffix} contains chart or TOC field, using native parser")
-        return native_analyze(file_bytes, image_writer=image_writer)
-
-    try:
-        return anydoc_analyze(file_bytes, file_suffix, image_writer=image_writer)
-    except AnydocConvertError as exc:
-        if native_analyze is None:
-            raise
-        logger.warning(f"anydoc failed on {file_suffix} ({exc}), falling back to native parser")
-        return native_analyze(file_bytes, image_writer=image_writer)
-
-
 def _parse_office_docs(
         output_dir,
         pdf_file_names: list[str],
@@ -676,10 +643,10 @@ def _parse_office_docs(
         local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, "office")
         image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
 
-        middle_json, infer_result = _analyze_office_doc(
+        middle_json, infer_result = anydoc_analyze(
             file_bytes,
             file_suffix,
-            image_writer,
+            image_writer=image_writer,
         )
         parsed.append(
             _ParsedDoc(
