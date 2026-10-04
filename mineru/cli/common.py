@@ -31,7 +31,6 @@ from mineru.backend.office.image_analyze import (
     analyze_office_images,
 )
 from mineru.backend.anydoc.anydoc_analyze import anydoc_analyze
-from mineru.backend.anydoc.pdf_route import can_parse_pdf_with_anydoc
 from mineru.utils.pdfium_guard import (
     get_loadable_pdfium_page_indices,
     rewrite_pdf_bytes_with_pdfium,
@@ -657,38 +656,6 @@ def _parse_office_docs(
     return parsed
 
 
-def _parse_anydoc_pdfs(
-        output_dir,
-        pdf_file_names: list[str],
-        pdf_bytes_list: list[bytes],
-        backend: str,
-        parse_method: str,
-        start_page_id: int,
-        end_page_id,
-) -> list[_ParsedDoc]:
-    """纯文本 PDF 走 anydoc 快路径；扫描件、图文混合和分页请求仍交给 MinerU。"""
-    parsed: list[_ParsedDoc] = []
-    for i, file_bytes in enumerate(pdf_bytes_list):
-        if guess_suffix_by_bytes(file_bytes) not in pdf_suffixes:
-            continue
-        if not can_parse_pdf_with_anydoc(file_bytes, start_page_id, end_page_id):
-            continue
-
-        pdf_file_name = pdf_file_names[i]
-        parse_dir_name = build_parse_dir(output_dir, pdf_file_name, backend, parse_method).name
-        local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_dir_name)
-        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
-
-        middle_json, infer_result = anydoc_analyze(file_bytes, "pdf", image_writer=image_writer)
-        parsed.append(
-            _ParsedDoc(
-                i, pdf_file_name, file_bytes, "pdf",
-                local_image_dir, local_md_dir, md_writer, middle_json, infer_result,
-            )
-        )
-    return parsed
-
-
 def _write_parsed_outputs(
         parsed_list: list[_ParsedDoc],
         f_dump_md=True,
@@ -760,12 +727,8 @@ def do_parse(
                 server_url=server_url,
                 **kwargs,
             )
-    anydoc_pdf_parsed = _parse_anydoc_pdfs(
-        output_dir, pdf_file_names, pdf_bytes_list, backend, parse_method,
-        start_page_id, end_page_id,
-    )
     need_remove_index = _write_parsed_outputs(
-        office_parsed + anydoc_pdf_parsed,
+        office_parsed,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
         f_dump_model_output=f_dump_model_output,
@@ -871,13 +834,9 @@ async def aio_do_parse(
                 server_url=server_url,
                 **kwargs,
             )
-    anydoc_pdf_parsed = await asyncio.to_thread(
-        _parse_anydoc_pdfs, output_dir, pdf_file_names, pdf_bytes_list, backend,
-        parse_method, start_page_id, end_page_id,
-    )
     need_remove_index = await asyncio.to_thread(
         _write_parsed_outputs,
-        office_parsed + anydoc_pdf_parsed,
+        office_parsed,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
         f_dump_model_output=f_dump_model_output,

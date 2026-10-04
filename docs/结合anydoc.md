@@ -3,13 +3,13 @@ office 文档全部交给 anydoc，原生 OOXML 解析器已整体移除。
 **分流**
 
 - office 后缀（docx/pptx/xlsx/doc/ppt/xls/odt/ods/odp/rtf/epub/csv）→ anydoc，解析失败直接报错
-- PDF 纯文本层 + 整篇 → anydoc；扫描件 / 含图 / 指定页范围 → MinerU 原 backend（`pdf_route.can_parse_pdf_with_anydoc`）
+- PDF 一律走 MinerU 原 backend（pipeline / vlm / hybrid），不经 anydoc
 - 图片解码落盘到 `<output>/<name>/office/images/`，再由 `analyze_office_images` / `aio_analyze_office_images` 出 VLM caption
 
 **链路** `mineru/cli/common.py`
 
 1. `_parse_office_docs` → `anydoc_analyze(file_bytes, suffix, image_writer=...)`
-2. 非 PDF：`anydoc.to_document` → `document_to_page_blocks`；PDF：`to_markdown_bytes` → `markdown_to_page_blocks`
+2. `anydoc.to_document` → `document_to_page_blocks`
 3. 统一汇入 office 中间层 `result_to_middle_json`，图片 data-URI 在此解码落盘
 4. `_write_parsed_outputs` → `_process_output` 出 md / content_list / middle_json
 

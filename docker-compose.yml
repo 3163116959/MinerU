@@ -18,6 +18,10 @@ services:
       - MINERU_VLM_GENERIC_IMAGE_PROMPT=1
     volumes:
       - ./mineru_output:/app/output
+    # 宿主 systemd-resolved 的默认上游是公网 DNS，解析不了内网 VLM 域名 → 直接指向内网 DNS
+    dns:
+      - 10.129.128.151
+      - 10.137.130.151
     command: >
       mineru-api
       --host 0.0.0.0

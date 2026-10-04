@@ -6,7 +6,6 @@ import anydoc
 from loguru import logger
 
 from mineru.backend.anydoc.document_to_blocks import document_to_page_blocks
-from mineru.backend.anydoc.markdown_to_blocks import markdown_to_page_blocks
 from mineru.backend.office.model_output_to_middle_json import result_to_middle_json
 
 def anydoc_format(file_suffix: str) -> str | None:
@@ -21,15 +20,7 @@ def anydoc_analyze(file_bytes: bytes, file_suffix: str, image_writer=None):
         raise ValueError(f"anydoc does not support suffix: {file_suffix}")
 
     infer_start = time.time()
-    if file_format == "pdf":
-        # PDF 在 anydoc 里只有 Markdown 形态，没有文档模型。
-        page_blocks = markdown_to_page_blocks(
-            anydoc.to_markdown_bytes(file_bytes, file_format)
-        )
-    else:
-        page_blocks = document_to_page_blocks(
-            anydoc.to_document(file_bytes, file_format)
-        )
+    page_blocks = document_to_page_blocks(anydoc.to_document(file_bytes, file_format))
     logger.debug(
         f"anydoc parse finished: format={file_format}, "
         f"blocks={len(page_blocks)}, cost={round(time.time() - infer_start, 2)}s"
