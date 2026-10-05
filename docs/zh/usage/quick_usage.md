@@ -41,7 +41,34 @@ mineru -p <input_path> -o <output_path>
   >- 同步解析接口：`POST /file_parse`
   >- 任务查询接口：`GET /tasks/{task_id}`、`GET /tasks/{task_id}/result`
   >- API 输出目录由服务端固定控制，默认写入 `./output`
-  >- 上传文件当前支持 `PDF`、图片与 `DOCX`、`PPTX`、`XLSX`
+  >- 上传文件当前支持 `PDF`、图片、Office 文档与音频
+  >
+  >  | 类型 | 格式 |
+  >  |---|---|
+  >  | PDF | `pdf` |
+  >  | 图片 | `png` `jpg` `jpeg` `jp2` `webp` `gif` `bmp` `tiff` |
+  >  | Office | `docx` `pptx` `xlsx` `doc` `ppt` `xls` `odt` `ods` `odp` `rtf` `epub` `csv` |
+  >  | 音频 | `wav` `mp3` `flac` `ogg` `wma` `m4a` `aac`；`mp4` 视频取其音轨转写 |
+  >
+  >  文件类型按内容识别，与扩展名无关。
+  >
+  >- 音频由 WhisperX 解析：VAD 去除静音/无人声片段，自动分段，说话人分离，参数按中文调优。`backend`、`lang_list`、`parse_method`、页码等参数对音频无效。各返回字段含义：
+  >
+  >  | 字段 | 开关 | 内容 |
+  >  |---|---|---|
+  >  | `md_content` | `return_md` | 按说话人合并的转写稿，每段带说话人与起止时间，供人阅读 |
+  >  | `content_list` | `return_content_list` | 结构化列表，每个片段一条：`type="speech"`、`speaker`、`start`、`end`（秒）、`text` |
+  >  | `middle_json` | `return_middle_json` | 处理后的完整结果：语言、时长、说话人列表、片段及词级时间戳（`words`） |
+  >  | `model_output` | `return_model_output` | 模型原始输出：未对齐的 ASR 分段（`asr_segments`）与说话人分离轮次（`diarization`） |
+  >  | `images` | `return_images` | 音频无图片，恒为空 |
+  >
+  >  音频示例：
+  >  ```bash
+  >  curl -X POST http://127.0.0.1:8000/file_parse \
+  >    -F "files=@meeting.m4a" \
+  >    -F "return_md=true" \
+  >    -F "return_content_list=true"
+  >  ```
   >
   >- `POST /tasks` 会立即返回 `task_id`；`POST /file_parse` 会在内部提交到同一个任务管理器，等待任务完成后同步返回最终结果。
   >- 当任务处于排队状态时，任务提交结果和状态查询结果中可能会返回 `queued_ahead` 字段，用于表示前方排队任务数。

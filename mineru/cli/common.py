@@ -49,6 +49,8 @@ office_suffixes = [
     "docx", "pptx", "xlsx", "doc", "ppt", "xls",
     "odt", "ods", "odp", "rtf", "epub", "csv",
 ]
+# 音频一律由 whisperx 解析；取值为 magika 标签，m4a/aac 容器被识别为 mp4。
+audio_suffixes = ["wav", "mp3", "flac", "ogg", "wma", "mp4"]
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Maximum UTF-8 byte length allowed for task stems used in filenames.
@@ -181,7 +183,7 @@ def read_fn(path, file_suffix: str | None = None):
             file_suffix = guess_suffix_by_bytes(file_bytes, path)
         if file_suffix in image_suffixes:
             return images_bytes_to_pdf_bytes(file_bytes)
-        elif file_suffix in pdf_suffixes + office_suffixes:
+        elif file_suffix in pdf_suffixes + office_suffixes + audio_suffixes:
             return file_bytes
         else:
             raise Exception(f"Unknown file suffix: {file_suffix}")
@@ -677,6 +679,67 @@ def _write_parsed_outputs(
     return [item.index for item in parsed_list]
 
 
+def _parse_audio_docs(
+        output_dir,
+        pdf_file_names: list[str],
+        pdf_bytes_list: list[bytes],
+        f_dump_md=True,
+        f_dump_middle_json=True,
+        f_dump_model_output=True,
+        f_dump_orig_file=True,
+        f_dump_content_list=True,
+) -> list[int]:
+    """解析并落盘音频，返回已处理的下标；音频无版面信息，不走 _process_output。"""
+    from mineru.backend.audio.audio_analyze import audio_analyze
+    from mineru.backend.audio.audio_middle_json_mkcontent import (
+        make_content_list,
+        make_markdown,
+    )
+
+    handled: list[int] = []
+    for i, file_bytes in enumerate(pdf_bytes_list):
+        file_suffix = guess_suffix_by_bytes(file_bytes)
+        if file_suffix not in audio_suffixes:
+            continue
+
+        file_name = pdf_file_names[i]
+        # 音频没有图片产物，不用 prepare_env 以免生成空 images 目录。
+        local_md_dir = str(build_parse_dir(output_dir, file_name, "", "", is_audio=True))
+        os.makedirs(local_md_dir, exist_ok=True)
+        md_writer = FileBasedDataWriter(local_md_dir)
+        middle_json, results = audio_analyze(file_bytes, file_suffix)
+
+        if f_dump_orig_file:
+            md_writer.write(f"{file_name}_origin.{file_suffix}", file_bytes)
+        if f_dump_md:
+            md_writer.write_string(f"{file_name}.md", make_markdown(middle_json))
+        if f_dump_content_list:
+            md_writer.write_string(
+                f"{file_name}_content_list.json",
+                json.dumps(make_content_list(middle_json), ensure_ascii=False, indent=4),
+            )
+        if f_dump_middle_json:
+            md_writer.write_string(
+                f"{file_name}_middle.json",
+                json.dumps(middle_json, ensure_ascii=False, indent=4),
+            )
+        if f_dump_model_output:
+            md_writer.write_string(
+                f"{file_name}_model.json",
+                json.dumps(results, ensure_ascii=False, indent=4),
+            )
+        logger.debug(f"local output dir is {local_md_dir}")
+        handled.append(i)
+    return handled
+
+
+def _remove_handled(indices, pdf_bytes_list, pdf_file_names, p_lang_list):
+    for index in sorted(indices, reverse=True):
+        del pdf_bytes_list[index]
+        del pdf_file_names[index]
+        del p_lang_list[index]
+
+
 def _resolve_office_vlm_backend(backend: str, is_async: bool) -> str | None:
     """office 没有页图，只能借 VLM 的单图分析补图片语义；pipeline 无 VLM 则不做。"""
     for prefix in ("vlm-", "hybrid-"):
@@ -714,6 +777,15 @@ def do_parse(
         **kwargs,
 ):
     backend = normalize_backend(backend)
+    audio_handled = _parse_audio_docs(
+        output_dir, pdf_file_names, pdf_bytes_list,
+        f_dump_md=f_dump_md,
+        f_dump_middle_json=f_dump_middle_json,
+        f_dump_model_output=f_dump_model_output,
+        f_dump_orig_file=f_dump_orig_pdf,
+        f_dump_content_list=f_dump_content_list,
+    )
+    _remove_handled(audio_handled, pdf_bytes_list, pdf_file_names, p_lang_list)
     office_parsed = _parse_office_docs(output_dir, pdf_file_names, pdf_bytes_list)
     office_vlm_backend = (
         _resolve_office_vlm_backend(backend, is_async=False) if image_analysis else None
@@ -736,12 +808,9 @@ def do_parse(
         f_dump_content_list=f_dump_content_list,
         f_make_md_mode=f_make_md_mode,
     )
-    for index in sorted(need_remove_index, reverse=True):
-        del pdf_bytes_list[index]
-        del pdf_file_names[index]
-        del p_lang_list[index]
+    _remove_handled(need_remove_index, pdf_bytes_list, pdf_file_names, p_lang_list)
     if not pdf_bytes_list:
-        logger.warning("No valid PDF or image files to process.")
+        logger.info("No PDF or image files left to process.")
         return
 
     # 预处理PDF字节数据
@@ -817,6 +886,16 @@ async def aio_do_parse(
         **kwargs,
 ):
     backend = normalize_backend(backend)
+    # 音频推理同步且耗时，同 office 一样放到线程中。
+    audio_handled = await asyncio.to_thread(
+        _parse_audio_docs, output_dir, pdf_file_names, pdf_bytes_list,
+        f_dump_md=f_dump_md,
+        f_dump_middle_json=f_dump_middle_json,
+        f_dump_model_output=f_dump_model_output,
+        f_dump_orig_file=f_dump_orig_pdf,
+        f_dump_content_list=f_dump_content_list,
+    )
+    _remove_handled(audio_handled, pdf_bytes_list, pdf_file_names, p_lang_list)
     # Office 解析是同步且可能耗时的操作，异步入口需要放到线程中避免阻塞事件循环。
     office_parsed = await asyncio.to_thread(
         _parse_office_docs, output_dir, pdf_file_names, pdf_bytes_list
@@ -844,12 +923,9 @@ async def aio_do_parse(
         f_dump_content_list=f_dump_content_list,
         f_make_md_mode=f_make_md_mode,
     )
-    for index in sorted(need_remove_index, reverse=True):
-        del pdf_bytes_list[index]
-        del pdf_file_names[index]
-        del p_lang_list[index]
+    _remove_handled(need_remove_index, pdf_bytes_list, pdf_file_names, p_lang_list)
     if not pdf_bytes_list:
-        logger.warning("No valid PDF or image files to process.")
+        logger.info("No PDF or image files left to process.")
         return
 
     # 预处理PDF字节数据

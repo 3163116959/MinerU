@@ -128,7 +128,12 @@ async def parse_request_form(
     files: Annotated[
         list[UploadFile],
         File(
-            description="Upload PDF, image, DOCX, PPTX, or XLSX files for parsing",
+            description=(
+                "Upload files for parsing. Supported: PDF; images (png/jpg/jpeg/jp2/webp/gif/bmp/tiff); "
+                "office (docx/pptx/xlsx/doc/ppt/xls/odt/ods/odp/rtf/epub/csv); "
+                "audio (wav/mp3/flac/ogg/wma/m4a/aac, and mp4 whose audio track is transcribed). "
+                "File type is detected from content, not the extension."
+            ),
             json_schema_extra=SWAGGER_UI_FILE_ARRAY_SCHEMA_EXTRA,
         ),
     ],
@@ -214,23 +219,23 @@ async def parse_request_form(
     ] = None,
     return_md: Annotated[
         bool,
-        Form(description="Return markdown content in response"),
+        Form(description="Return markdown content in response. Audio: speaker-labelled transcript with timestamps"),
     ] = True,
     return_middle_json: Annotated[
         bool,
-        Form(description="Return middle JSON in response"),
+        Form(description="Return middle JSON in response. Audio: processed segments with speaker and word-level timestamps"),
     ] = False,
     return_model_output: Annotated[
         bool,
-        Form(description="Return model output JSON in response"),
+        Form(description="Return model output JSON in response. Audio: raw model output (unaligned ASR segments and diarization turns)"),
     ] = False,
     return_content_list: Annotated[
         bool,
-        Form(description="Return content list JSON in response"),
+        Form(description="Return content list JSON in response. Audio: one speech item per segment (speaker/start/end/text)"),
     ] = False,
     return_images: Annotated[
         bool,
-        Form(description="Return extracted images in response"),
+        Form(description="Return extracted images in response. Audio has no images"),
     ] = False,
     response_format_zip: Annotated[
         bool,

@@ -100,10 +100,14 @@ gradio = [
     "gradio>=5.49.1,!=6.0.0,!=6.0.1,!=6.0.2,!=6.1.0,!=6.2.0,!=6.3.0,!=6.4.0,!=6.5.0,!=6.5.1,!=6.6.0,!=6.7.0,<6.9.0",
     "gradio-pdf>=0.0.22",
 ]
+audio = [
+    "whisperx>=3.8.6,<4",
+]
 core = [
     "mineru[vlm]",
     "mineru[pipeline]",
     "mineru[gradio]",
+    "mineru[audio]",
 ]
 all = [
     "mineru[core]",
@@ -129,6 +133,15 @@ mineru-models-download = "mineru.cli.models_download:download_models"
 mineru-api = "mineru.cli.fast_api:main"
 mineru-router = "mineru.cli.router:main"
 mineru-gradio = "mineru.cli.gradio_app:main"
+
+[tool.uv]
+# 全平台不装 torchcodec：pyannote-audio 无条件依赖它，但本项目用不到 ——
+# whisperx 用 ffmpeg 解码，再把内存 waveform 交给 pyannote，torchcodec 只服务"按文件路径解码"。
+# 它也从未发布 Linux aarch64 wheel，保留会让 x86 与 arm 环境分叉。
+# uv 无"删除依赖"语法，用恒假 marker 的 override 实现；pyannote 缺它只打 warning。
+override-dependencies = [
+    "torchcodec ; sys_platform == 'never'",
+]
 
 [tool.setuptools.dynamic]
 version = { attr = "mineru.version.__version__" }

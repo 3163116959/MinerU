@@ -41,7 +41,34 @@ If you need to adjust parsing options through custom parameters, you can also ch
   >- Synchronous parsing endpoint: `POST /file_parse`
   >- Task query endpoints: `GET /tasks/{task_id}`, `GET /tasks/{task_id}/result`
   >- API outputs are controlled by the server and written to `./output` by default
-  >- Uploads currently support `PDF`, image, `DOCX`, `PPTX`, and `XLSX` files
+  >- Uploads currently support `PDF`, images, Office documents, and audio
+  >
+  >  | Type | Formats |
+  >  |---|---|
+  >  | PDF | `pdf` |
+  >  | Image | `png` `jpg` `jpeg` `jp2` `webp` `gif` `bmp` `tiff` |
+  >  | Office | `docx` `pptx` `xlsx` `doc` `ppt` `xls` `odt` `ods` `odp` `rtf` `epub` `csv` |
+  >  | Audio | `wav` `mp3` `flac` `ogg` `wma` `m4a` `aac`; for `mp4` video the audio track is transcribed |
+  >
+  >  File type is detected from content, not the extension.
+  >
+  >- Audio is parsed by WhisperX: VAD drops silent / non-speech parts, automatic segmentation, speaker diarization, tuned for Chinese. `backend`, `lang_list`, `parse_method` and page options are ignored for audio. Response fields:
+  >
+  >  | Field | Switch | Content |
+  >  |---|---|---|
+  >  | `md_content` | `return_md` | Human-readable transcript, adjacent turns of the same speaker merged, with speaker and time range |
+  >  | `content_list` | `return_content_list` | Structured list, one item per segment: `type="speech"`, `speaker`, `start`, `end` (seconds), `text` |
+  >  | `middle_json` | `return_middle_json` | Full processed result: language, duration, speakers, segments with word-level timestamps (`words`) |
+  >  | `model_output` | `return_model_output` | Raw model output: unaligned ASR segments (`asr_segments`) and diarization turns (`diarization`) |
+  >  | `images` | `return_images` | Always empty for audio |
+  >
+  >  Audio example:
+  >  ```bash
+  >  curl -X POST http://127.0.0.1:8000/file_parse \
+  >    -F "files=@meeting.m4a" \
+  >    -F "return_md=true" \
+  >    -F "return_content_list=true"
+  >  ```
   >
   >- `POST /tasks` returns immediately with a `task_id`. `POST /file_parse` uses the same task manager internally, waits for the task to finish, and then returns the final result synchronously.
   >- When a task is waiting in the queue, both the submission response and task-status response may include `queued_ahead` to indicate how many tasks are ahead of it.

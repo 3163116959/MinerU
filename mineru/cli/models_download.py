@@ -5,7 +5,7 @@ import sys
 import click
 from loguru import logger
 
-from mineru.utils.enum_class import ModelPath
+from mineru.utils.enum_class import AudioModelPath, ModelPath
 from mineru.utils.models_download_utils import (
     CONFIG_TEMPLATE_URL,
     auto_download_and_get_model_root_path,
@@ -16,6 +16,10 @@ from mineru.utils.models_download_utils import (
 
 MODEL_SOURCE_ENV_VAR = 'MINERU_MODEL_SOURCE'
 REMOTE_MODEL_SOURCES = ('auto', 'huggingface', 'modelscope')
+MODEL_TYPES = ['pipeline', 'vlm', 'audio', 'all']
+AUDIO_MODELS_DIR_ENV_VAR = 'MINERU_AUDIO_MODELS_DIR'
+# 只需 PyTorch 权重：flax 权重与演示动图占 1.2GB，加载端用不到。
+AUDIO_IGNORE_PATTERNS = ['*.msgpack', '*.gif']
 
 
 def configure_model(model_dir, model_type, model_source):
@@ -57,6 +61,35 @@ def download_vlm_models(model_source):
     download_finish_path = auto_download_and_get_model_root_path("/", repo_mode='vlm')
     logger.info(f"VLM models downloaded successfully to: {download_finish_path}")
     configure_model(download_finish_path, "vlm", model_source)
+
+
+def download_audio_models(model_source):
+    """下载 WhisperX 所需的 ASR/对齐/说话人分离模型与 nltk punkt_tab，全部落在同一根目录。"""
+    import nltk
+    from huggingface_hub import snapshot_download as hf_snapshot_download
+    from modelscope import snapshot_download as ms_snapshot_download
+
+    # 用 local_dir 平铺成固定子目录：加载端按目录名直接取，不依赖各家缓存布局。
+    root = os.path.abspath(os.path.expanduser(
+        os.getenv(AUDIO_MODELS_DIR_ENV_VAR, '~/.cache/mineru/audio')
+    ))
+    snapshot_download = ms_snapshot_download if model_source == 'modelscope' else hf_snapshot_download
+    for repo_id, sub_dir in (AudioModelPath.whisper, AudioModelPath.align, AudioModelPath.diarize):
+        logger.info(f"Downloading model: {repo_id}")
+        snapshot_download(
+            repo_id,
+            local_dir=os.path.join(root, sub_dir),
+            ignore_patterns=AUDIO_IGNORE_PATTERNS,
+        )
+    # whisperx 对齐阶段固定加载 punkt_tab 分句；运行期离线，必须在此预置。
+    if not nltk.download(
+        'punkt_tab',
+        download_dir=os.path.join(root, AudioModelPath.nltk_data),
+        raise_on_error=True,
+    ):
+        raise RuntimeError("Failed to download nltk punkt_tab")
+    logger.info(f"Audio models downloaded successfully to: {root}")
+    configure_model(root, "audio", model_source)
 
 
 def get_effective_download_model_source(requested_model_source):
@@ -105,7 +138,7 @@ def temporary_model_source(model_source):
     '-m',
     '--model_type',
     'model_type',
-    type=click.Choice(['pipeline', 'vlm', 'all']),
+    type=click.Choice(MODEL_TYPES),
     help="""
         The type of the model to download.
         """,
@@ -114,7 +147,7 @@ def temporary_model_source(model_source):
 def download_models(model_source, model_type):
     """Download MinerU model files.
 
-    Supports downloading pipeline or VLM models from ModelScope or HuggingFace.
+    Supports downloading pipeline, VLM or audio models from ModelScope or HuggingFace.
     """
     # 如果未显式指定则交互式输入下载来源
     if model_source is None:
@@ -130,7 +163,7 @@ def download_models(model_source, model_type):
     if model_type is None:
         model_type = click.prompt(
             "Please select the model type to download: ",
-            type=click.Choice(['pipeline', 'vlm', 'all']),
+            type=click.Choice(MODEL_TYPES),
             default='all'
         )
 
@@ -142,9 +175,12 @@ def download_models(model_source, model_type):
                 download_pipeline_models(effective_model_source)
             elif model_type == 'vlm':
                 download_vlm_models(effective_model_source)
+            elif model_type == 'audio':
+                download_audio_models(effective_model_source)
             elif model_type == 'all':
                 download_pipeline_models(effective_model_source)
                 download_vlm_models(effective_model_source)
+                download_audio_models(effective_model_source)
             else:
                 click.echo(f"Unsupported model type: {model_type}", err=True)
                 sys.exit(1)

@@ -32,6 +32,7 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
 # opencv 需要 libgl1 + libglib2.0-0，CJK 渲染需要 noto 字体；
 # LibreOffice：WMF/EMF 矢量图在非 Windows 上 Pillow 无渲染后端，
 # office_image.rasterize_vector_image 调 soffice 转 PNG，缺它则退占位图。
+# ffmpeg：whisperx.load_audio 调 ffmpeg 解码，torchcodec 也要它的共享库。
 # 一段 apt 装完：拆成两段会各跑一次 apt-get update，且前一段清 lists 会让后一段白跑索引。
 # apt 缓存挂载需先删 docker-clean，否则 apt 装完即清空缓存目录；
 # 挂载的 /var/cache/apt 与 /var/lib/apt/lists 不落进镜像层，无需再手工清理。
@@ -44,6 +45,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         fonts-noto-core \
         fonts-noto-cjk \
         fontconfig \
+        ffmpeg \
         libgl1 \
         libglib2.0-0 \
         libreoffice-draw \
@@ -51,6 +53,40 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fc-cache -f && \
     ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone
+
+# ========== downloader：只含模型下载器源码，供 models 阶段 bind 挂载 ==========
+# 单独成段：models 层的缓存键只取决于这几个文件，改其它业务代码不会触发重下权重。
+# 上游给这些模块加新 import → models 阶段直接 ImportError，不静默降级。
+FROM scratch AS downloader
+COPY mineru/__init__.py /src/mineru/
+COPY mineru/utils/__init__.py \
+     mineru/utils/enum_class.py \
+     mineru/utils/models_download_utils.py \
+     mineru/utils/config_reader.py \
+     /src/mineru/utils/
+COPY mineru/cli/__init__.py mineru/cli/models_download.py /src/mineru/cli/
+
+# ========== models：权重直接下载进镜像层，紧贴系统层之上 ==========
+# 权重几乎不变 → 放在依赖与业务代码之下，改 pyproject.toml / 代码都复用这层，
+# 推送/拉取时也只在系统层或下载器变化时才重传这几 GB。
+# 下载器依赖装进临时 --target 目录，同一 RUN 内删掉，不污染运行环境；
+# HOME 指向临时目录 → modelscope/nltk 等写到家目录的杂项随之一并清掉。
+# 末尾 .incomplete 断言：宁可构建失败，也不把残缺权重烤进镜像。
+FROM system AS models
+ARG PIP_INDEX
+RUN --mount=type=bind,from=downloader,source=/src,target=/opt/downloader \
+    --mount=type=cache,target=/var/cache/pip \
+    set -eux; \
+    PIP_CACHE_DIR=/var/cache/pip python -m pip install --index-url "${PIP_INDEX}" \
+        --target /tmp/dl click loguru requests huggingface-hub modelscope nltk; \
+    HOME=/tmp/dlhome \
+    PYTHONPATH=/tmp/dl:/opt/downloader \
+    MODELSCOPE_CACHE=/opt/models \
+    MINERU_AUDIO_MODELS_DIR=/opt/models/audio \
+    MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json \
+        python -m mineru.cli.models_download -s modelscope -m all; \
+    ! find /opt/models -name '*.incomplete' | grep -q .; \
+    rm -rf /tmp/dl /tmp/dlhome
 
 # ========== deps：外部依赖 → /opt/venv，只由依赖清单决定 ==========
 # 直接挂在基础镜像上：装 wheel 不需要系统层那些运行时库，
@@ -77,39 +113,6 @@ COPY mineru/version.py ./mineru/version.py
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --no-install-project --extra core
 
-# ========== weights：烤入官方权重，与依赖清单、业务代码均无关 ==========
-# 不挂在 deps 上：否则改一次 pyproject.toml 就要重跑一遍 models_download
-# 的网络校验和 cp -a 的几 GB 拷贝。这里只装下载器 import 闭包用到的包
-# （models_download.py / models_download_utils.py / config_reader.py），
-# 上游给这些模块加新 import → 这里直接 ImportError，不静默降级。
-# 缓存路径与运行时路径同为 /opt/models → mineru.json 记录的绝对路径无需改写。
-FROM ${BASE_IMAGE} AS weights
-ARG PIP_INDEX
-ENV PIP_INDEX_URL=${PIP_INDEX} \
-    PIP_NO_CACHE_DIR=1
-RUN pip install click loguru requests huggingface-hub modelscope
-
-WORKDIR /src
-COPY mineru/__init__.py ./mineru/
-COPY mineru/utils/__init__.py \
-     mineru/utils/enum_class.py \
-     mineru/utils/models_download_utils.py \
-     mineru/utils/config_reader.py \
-     ./mineru/utils/
-COPY mineru/cli/__init__.py mineru/cli/models_download.py ./mineru/cli/
-ENV PYTHONPATH=/src \
-    MODELSCOPE_CACHE=/opt/models \
-    MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json
-# rm mineru.json：MinerU 的"配置里有路径且目录存在就跳过下载"是目录级判断
-# （models_download_utils.py:151），断点续传留下的半截文件会被当成下载完成。
-# 删掉配置 → 每次都交给 modelscope 自己校验补齐。
-# 再用 .incomplete 断言兜底：宁可构建失败，也不把残缺权重烤进镜像。
-RUN --mount=type=cache,target=/opt/models,id=mineru-models,sharing=locked \
-    rm -f /opt/models/mineru.json \
-    && python -m mineru.cli.models_download -s modelscope -m all \
-    && ! find /opt/models -name '*.incomplete' | grep -q . \
-    && cp -a /opt/models /opt/models-export
-
 # ========== build：项目打成 wheel，装到 venv 之外的 /opt/app ==========
 FROM deps AS build
 COPY . /src
@@ -118,12 +121,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && uv pip install --python /opt/venv --no-deps --target /opt/app /src/dist/*.whl
 
 # ========== runtime ==========
-# 从 system 起：这一阶段自身不再有 RUN 层，只剩三条 COPY。
-FROM system
+# 从 models 起（系统层 → 权重层），这一阶段自身不再有 RUN 层，只剩两条 COPY。
+FROM models
 
-# 三条 COPY = 三层，按变动频率升序：权重（几乎不变）→ 依赖 → 业务代码。
+# 两条 COPY = 两层，按变动频率升序：依赖 → 业务代码。
 # 依赖层取自 deps（不含项目代码），改代码时 digest 不变，pull 只重传几 MB 的 /opt/app。
-COPY --from=weights /opt/models-export /opt/models
 COPY --from=deps /opt/venv /opt/venv
 COPY --from=build /opt/app /opt/app
 
@@ -135,6 +137,8 @@ ENV PATH="/opt/venv/bin:/opt/app/bin:$PATH" \
     LC_ALL=C.UTF-8 \
     PYTHONIOENCODING=utf-8 \
     MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json \
+    NLTK_DATA=/opt/models/audio/nltk_data \
+    PYANNOTE_METRICS_ENABLED=false \
     MINERU_MODEL_SOURCE=local \
     MINERU_DEVICE_MODE=cpu
 

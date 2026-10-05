@@ -34,6 +34,7 @@ from base64 import b64encode
 from mineru.cli.common import (
     aio_do_parse,
     do_parse,
+    audio_suffixes,
     image_suffixes,
     normalize_upload_filename,
     office_suffixes,
@@ -84,7 +85,7 @@ TASK_PROCESSING = "processing"
 TASK_COMPLETED = "completed"
 TASK_FAILED = "failed"
 TASK_TERMINAL_STATES = {TASK_COMPLETED, TASK_FAILED}
-SUPPORTED_UPLOAD_SUFFIXES = pdf_suffixes + image_suffixes + office_suffixes
+SUPPORTED_UPLOAD_SUFFIXES = pdf_suffixes + image_suffixes + office_suffixes + audio_suffixes
 RESULT_IMAGE_SUFFIXES = set(image_suffixes) | {"svg"}
 DEFAULT_TASK_RETENTION_SECONDS = 24 * 60 * 60
 DEFAULT_TASK_CLEANUP_INTERVAL_SECONDS = 5 * 60
@@ -432,6 +433,7 @@ def get_parse_dir(output_dir: str, pdf_name: str, backend: str, parse_method: st
             backend,
             parse_method,
             allow_office_fallback=True,
+            allow_audio_fallback=True,
         )
     )
 
@@ -1241,6 +1243,11 @@ def get_task_manager() -> AsyncTaskManager:
     description=(
         "Submit a parsing task to the shared async task manager, wait for it to "
         "finish, and return the final parsing result in the same response."
+        "\n\nAudio files (wav/mp3/flac/ogg/wma/m4a/aac/mp4) are transcribed by WhisperX "
+        "(VAD removes silence, speaker diarization, Chinese-tuned). Backend/OCR/page options "
+        "are ignored for audio. Outputs: md = speaker-labelled transcript; content_list = one "
+        "speech item per segment; middle_json = segments with word-level timestamps; "
+        "model_output = raw ASR segments and diarization turns."
     ),
 )
 async def parse_pdf(
@@ -1289,6 +1296,11 @@ async def parse_pdf(
     description=(
         "Submit files for parsing and return immediately with a task id that can be "
         "checked via the task status and result endpoints."
+        "\n\nAudio files (wav/mp3/flac/ogg/wma/m4a/aac/mp4) are transcribed by WhisperX "
+        "(VAD removes silence, speaker diarization, Chinese-tuned). Backend/OCR/page options "
+        "are ignored for audio. Outputs: md = speaker-labelled transcript; content_list = one "
+        "speech item per segment; middle_json = segments with word-level timestamps; "
+        "model_output = raw ASR segments and diarization turns."
     ),
 )
 async def submit_parse_task(
