@@ -20,6 +20,13 @@ VAD_OFFSET = 0.363
 BATCH_SIZE = 8
 # Whisper 中文常输出繁体且少标点，简体带标点的提示句可同时纠正两者。
 INITIAL_PROMPT = "以下是普通话的句子，使用简体中文并带有标点。"
+BEAM_SIZE = 8
+# WhisperX forwards these options to faster-whisper; retain preceding text across VAD chunks.
+ASR_OPTIONS = {
+    "initial_prompt": INITIAL_PROMPT,
+    "beam_size": BEAM_SIZE,
+    "condition_on_previous_text": True,
+}
 
 _models = None
 # 模型常驻且非线程安全；串行推理同时避免与 vllm 争抢显存时并发放大峰值。
@@ -60,7 +67,7 @@ def _load_models():
         device,
         compute_type=compute_type,
         language=LANGUAGE,
-        asr_options={"initial_prompt": INITIAL_PROMPT},
+        asr_options=ASR_OPTIONS,
         vad_method="pyannote",
         vad_options={"chunk_size": CHUNK_SIZE, "vad_onset": VAD_ONSET, "vad_offset": VAD_OFFSET},
         local_files_only=True,
