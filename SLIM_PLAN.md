@@ -144,9 +144,9 @@ VLM 输出有随机性 → 文本若有细微差异，以块数/结构为准，�
 
 ## 进度
 
-- [ ] 阶段 0 基线
-- [ ] 阶段 1 删入口
-- [ ] 阶段 2 收敛 API 参数
+- [~] 阶段 0 基线（git/镜像完成；回归基线未产出：远程 VLM 不可达）
+- [x] 阶段 1 删入口（回归待补）
+- [x] 阶段 2 收敛 API 参数（回归待补）
 - [ ] 阶段 3 删后端派发分支
 - [ ] 阶段 4 kb-demo 同步
 - [ ] 阶段 5 依赖与镜像
@@ -155,3 +155,13 @@ VLM 输出有随机性 → 文本若有细微差异，以块数/结构为准，�
 ## 执行记录
 
 （每步完成后追加：日期、改动文件、验证结果、commit）
+
+- 2026-10-06 阶段 0：MinerU 建分支 `slim`（基于 `d5a8b45c`）；kb-demo 初次提交 `4d75b34`；镜像打 tag `mineru-local:baseline`（`c91a2eaf346c`）；回归脚本 `kb-demo/scripts/slim_regress.py`，样本 `/tmp/slim_samples`。
+  - 回归基线：audio 通过；demo1.pdf 起失败 → `server_url` 远程 VLM 不可达（宿主机连接超时，容器内 DNS 解析失败）。**需恢复网络后重跑基线**（用 baseline 镜像）。
+- 2026-10-06 阶段 1：commit `49e7403b`，删 CLI/gradio/router/本地 VLM server 入口及 scripts。import 检查通过。
+- 2026-10-06 阶段 2：commit `2b7575c3`。
+  - `api_request.py`：表单只留 files/server_url/model/api_key/return_md/return_middle_json/return_images/response_format_zip/return_original_file；固定 `PARSE_BACKEND=hybrid-http-client`、`PARSE_METHOD=auto`、`PARSE_LANG=ch`；删 backend/effort/parse_method/lang 校验与 model 凭证校验。
+  - `fast_api.py`：`AsyncParseTask` 去对应字段；`run_parse_job` 固定 effort=medium、formula/table/image=true、model_output/content_list=false、全页；去 pipeline→`do_parse` 分支；结果构建去 model_output/content_list；响应 `backend` 键保留（kb-demo 读取），值固定。
+  - 验证：ruff F 通过、import 通过、OpenAPI 表单字段核对通过。端到端回归待网络恢复。
+  - 行为变化：公网绑定且未开 `--allow-public-http-client` 时，音频请求也会被拒（backend 固定为 http-client）。compose 已开该开关 → 现部署无影响。
+  - kb-demo 仍发旧字段 → FastAPI 忽略多余表单字段，兼容；阶段 4 再清理。
