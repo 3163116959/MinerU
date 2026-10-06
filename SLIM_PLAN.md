@@ -144,10 +144,10 @@ VLM 输出有随机性 → 文本若有细微差异，以块数/结构为准，�
 
 ## 进度
 
-- [~] 阶段 0 基线（git/镜像完成；回归基线未产出：远程 VLM 不可达）
-- [x] 阶段 1 删入口（回归待补）
-- [x] 阶段 2 收敛 API 参数（回归待补）
-- [ ] 阶段 3 删后端派发分支
+- [x] 阶段 0 基线
+- [x] 阶段 1 删入口（含于阶段 3 回归）
+- [x] 阶段 2 收敛 API 参数（含于阶段 3 回归）
+- [x] 阶段 3 删后端派发分支
 - [ ] 阶段 4 kb-demo 同步
 - [ ] 阶段 5 依赖与镜像
 - [ ] 第 5 节逐项验证
@@ -165,3 +165,10 @@ VLM 输出有随机性 → 文本若有细微差异，以块数/结构为准，�
   - 验证：ruff F 通过、import 通过、OpenAPI 表单字段核对通过。端到端回归待网络恢复。
   - 行为变化：公网绑定且未开 `--allow-public-http-client` 时，音频请求也会被拒（backend 固定为 http-client）。compose 已开该开关 → 现部署无影响。
   - kb-demo 仍发旧字段 → FastAPI 忽略多余表单字段，兼容；阶段 4 再清理。
+- 2026-10-06 阶段 0 补：网络恢复后用 baseline 镜像重跑，产物 `kb-demo/tests/files/baseline/`（8 样本全过；md 本地处理不经 MinerU）。
+- 2026-10-06 阶段 3：commit `95df51a9`。
+  - `common.py`：删 `do_parse`、`_process_pipeline`、`_process_vlm`、`_async_process_vlm`、`_process_hybrid`、`_resolve_office_vlm_backend`、`_prepare_pdf_bytes` 及 pipeline/vlm/engine 派发；`aio_do_parse` 只走 hybrid-http-client（音频 → office → hybrid），office 图片分析固定 `http-client`。
+  - `hybrid_analyze.py`：删同步 `doc_analyze`、`_validate_parse_effort`、`HYBRID_ANALYZE_EFFORTS`、`effort == "high"` 分支（`aio_batch_two_step_extract`）；medium 逻辑去条件内联，middle_json `_effort` 仍由默认值写 `medium`。
+  - 删 `backend_options.py`；`api_request.PARSE_BACKEND` 内联字面量。
+  - 验证：被删符号 grep 无残留（`build/` 为旧构建产物，忽略）；ruff F 通过；新镜像内 import 通过；`docker compose up -d` healthy。
+  - 回归（`tests/files/slim_p3/`）vs 基线：`report.json` 去耗时后完全一致（页数/块类型计数/图片数/`_backend`/`_effort`/`_ocr_enable`）；audio、xlsx md 字节一致；其余 md 差异仅在 VLM 图片描述与 OCR 空白（随机性），结构一致。
