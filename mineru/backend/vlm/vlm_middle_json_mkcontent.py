@@ -99,7 +99,7 @@ def _apply_visual_sub_type(para_content, para_block):
         para_content['sub_type'] = sub_type
 
 
-def _build_visual_details_block(content, span_type, summary_override=''):
+def build_visual_details_block(content, span_type, summary_override=''):
     if not isinstance(content, str) or not content.strip():
         return ''
 
@@ -123,7 +123,7 @@ def _build_visual_body_segments(image_path, content, img_buket_path, span_type, 
     if media_path:
         body_segments.append((f"![]({media_path})", 'markdown_line'))
 
-    details_block = _build_visual_details_block(
+    details_block = build_visual_details_block(
         content,
         span_type,
         summary_override=summary_override,

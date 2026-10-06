@@ -2,6 +2,7 @@
 import re
 
 from mineru.utils.enum_class import MakeMode, BlockType, ContentType, ContentTypeV2
+from mineru.backend.vlm.vlm_middle_json_mkcontent import build_visual_details_block
 from mineru.backend.office.mkcontent.inline_renderer import (
     _append_hyperlink_part,
     _append_text_part,
@@ -387,6 +388,12 @@ def mk_blocks_to_markdown(para_blocks, make_mode, img_buket_path='', page_idx=No
                 ):
                     if span.get('image_path', ''):
                         para_text += f"![]({img_buket_path}/{span['image_path']})"
+                    # 与 hybrid 同格式：VLM 描述紧跟图片、包在 <details> 里，保证下游切分时图文不分离
+                    details_block = build_visual_details_block(
+                        span.get('content', ''), ContentType.IMAGE
+                    )
+                    if details_block:
+                        para_text += '\n' + details_block
                 for caption_text in _collect_caption_texts(
                     para_block,
                     BlockType.IMAGE_CAPTION,
