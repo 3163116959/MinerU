@@ -1,35 +1,21 @@
 # Copyright (c) Opendatalab. All rights reserved.
 import asyncio
-import importlib
-import importlib.util
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple, Sequence
 
 from loguru import logger
 
-from mineru.cli.backend_options import (
-    DEFAULT_HYBRID_EFFORT,
-    normalize_backend,
-    validate_effort,
-)
 from mineru.cli.output_paths import build_parse_dir
 from mineru.data.data_reader_writer import FileBasedDataWriter
 from mineru.utils.draw_bbox import draw_layout_bbox, draw_span_bbox
-from mineru.utils.engine_utils import get_vlm_engine
 from mineru.utils.enum_class import MakeMode
 from mineru.utils.guess_suffix_or_lang import guess_suffix_by_bytes
 from mineru.utils.pdf_image_tools import images_bytes_to_pdf_bytes
 from mineru.backend.vlm.vlm_middle_json_mkcontent import union_make as vlm_union_make
 from mineru.backend.office.office_middle_json_mkcontent import union_make as office_union_make
-from mineru.backend.vlm.vlm_analyze import doc_analyze as vlm_doc_analyze
-from mineru.backend.vlm.vlm_analyze import aio_doc_analyze as aio_vlm_doc_analyze
-from mineru.backend.office.image_analyze import (
-    aio_analyze_office_images,
-    analyze_office_images,
-)
+from mineru.backend.office.image_analyze import aio_analyze_office_images
 from mineru.backend.anydoc.anydoc_analyze import anydoc_analyze
 from mineru.utils.pdfium_guard import (
     get_loadable_pdfium_page_indices,
@@ -57,39 +43,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # 200 bytes is chosen to stay well below common filesystem limits (e.g. 255 bytes)
 # and to prevent generating excessively long or incompatible filenames.
 MAX_TASK_STEM_BYTES = 200
-
-
-class HybridDependencyError(RuntimeError):
-    pass
-
-
-def build_hybrid_dependency_error_message(backend: str) -> str:
-    return (
-        f"`{backend}` requires local pipeline dependencies (`mineru[pipeline]`, "
-        "including `torch`). Install `mineru[pipeline]` or `mineru[core]`. "
-        "If you need a lightweight remote client without local `torch`, "
-        "use `vlm-http-client` instead."
-    )
-
-
-def ensure_backend_dependencies(backend: str) -> None:
-    if not backend.startswith("hybrid-"):
-        return
-    if importlib.util.find_spec("torch") is None:
-        raise HybridDependencyError(build_hybrid_dependency_error_message(backend))
-
-
-def _load_hybrid_analyze_entrypoint(entrypoint_name: str, backend: str):
-    """加载统一 hybrid analyze 入口，解析强度由公开 effort 参数控制。"""
-    ensure_backend_dependencies(backend)
-    module_name = "mineru.backend.hybrid.hybrid_analyze"
-    try:
-        hybrid_analyze = importlib.import_module(module_name)
-    except (ImportError, ModuleNotFoundError) as exc:
-        raise HybridDependencyError(
-            build_hybrid_dependency_error_message(backend)
-        ) from exc
-    return getattr(hybrid_analyze, entrypoint_name)
+# 仅支持 hybrid-http-client：VLM 走远程 OpenAI 兼容服务。
+VLM_BACKEND = "http-client"
 
 
 def utf8_byte_length(value: str) -> int:
@@ -253,15 +208,6 @@ def convert_pdf_bytes_to_bytes(pdf_bytes, start_page_id=0, end_page_id=None):
     return pdf_bytes
 
 
-def _prepare_pdf_bytes(pdf_bytes_list, start_page_id, end_page_id):
-    """准备处理PDF字节数据"""
-    result = []
-    for pdf_bytes in pdf_bytes_list:
-        new_pdf_bytes = convert_pdf_bytes_to_bytes(pdf_bytes, start_page_id, end_page_id)
-        result.append(new_pdf_bytes)
-    return result
-
-
 def _process_output(
         pdf_info,
         pdf_bytes,
@@ -282,10 +228,7 @@ def _process_output(
         process_mode="vlm",
         orig_file_suffix="pdf",
 ):
-    from mineru.backend.pipeline.pipeline_middle_json_mkcontent import union_make as pipeline_union_make
-    if process_mode == "pipeline":
-        make_func = pipeline_union_make
-    elif process_mode == "vlm":
+    if process_mode == "vlm":
         make_func = vlm_union_make
     elif process_mode == "office":
         make_func = office_union_make
@@ -349,270 +292,40 @@ def _process_output(
     logger.debug(f"local output dir is {local_md_dir}")
 
 
-def _process_pipeline(
-        output_dir,
-        pdf_file_names,
-        pdf_bytes_list,
-        p_lang_list,
-        parse_method,
-        p_formula_enable,
-        p_table_enable,
-        f_draw_layout_bbox,
-        f_draw_span_bbox,
-        f_dump_md,
-        f_dump_middle_json,
-        f_dump_model_output,
-        f_dump_orig_pdf,
-        f_dump_content_list,
-        f_make_md_mode,
-        client_side_output_generation=False,
-):
-    """处理pipeline后端逻辑"""
-    from mineru.backend.pipeline.pipeline_analyze import doc_analyze_streaming as pipeline_doc_analyze_streaming
-
-    image_writer_list = []
-    md_writer_list = []
-    local_output_info = []
-    for idx, pdf_bytes in enumerate(pdf_bytes_list):
-        pdf_file_name = pdf_file_names[idx]
-        local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_method)
-        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
-        image_writer_list.append(image_writer)
-        md_writer_list.append(md_writer)
-        local_output_info.append((pdf_file_name, local_image_dir, local_md_dir))
-
-    output_futures = []
-
-    def run_output_task(doc_index, middle_json, model_list):
-        pdf_file_name, local_image_dir, local_md_dir = local_output_info[doc_index]
-        md_writer = md_writer_list[doc_index]
-        pdf_bytes = pdf_bytes_list[doc_index]
-        logger.debug(f"Pipeline output start: doc{doc_index}")
-        try:
-            _process_output(
-                middle_json["pdf_info"], pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
-                md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
-                f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-                f_make_md_mode, middle_json, model_list, process_mode="pipeline"
-            )
-            logger.debug(f"Pipeline output complete: doc{doc_index}")
-        except Exception:
-            logger.exception(f"Pipeline output failed: doc{doc_index}")
-            raise
-
-    with ThreadPoolExecutor(max_workers=1) as output_executor:
-        def on_doc_ready(doc_index, model_list, middle_json, ocr_enable):
-            logger.debug(
-                f"Pipeline doc ready: doc{doc_index} pages={len(middle_json['pdf_info'])} output_submitted=1"
-            )
-            future = output_executor.submit(run_output_task, doc_index, middle_json, model_list)
-            output_futures.append(future)
-
-        pipeline_doc_analyze_streaming(
-            pdf_bytes_list,
-            image_writer_list,
-            p_lang_list,
-            on_doc_ready,
-            parse_method=parse_method,
-            formula_enable=p_formula_enable,
-            table_enable=p_table_enable,
-            client_side_output_generation=client_side_output_generation,
-        )
-
-        for future in output_futures:
-            future.result()
-    return
-
-
-async def _async_process_vlm(
-        output_dir,
-        pdf_file_names,
-        pdf_bytes_list,
-        backend,
-        f_draw_layout_bbox,
-        f_draw_span_bbox,
-        f_dump_md,
-        f_dump_middle_json,
-        f_dump_model_output,
-        f_dump_orig_pdf,
-        f_dump_content_list,
-        f_make_md_mode,
-        server_url=None,
-        **kwargs,
-):
-    """异步处理VLM后端逻辑"""
-    parse_method = "vlm"
-    f_draw_span_bbox = False
-    if not backend.endswith("client"):
-        server_url = None
-
-    for idx, pdf_bytes in enumerate(pdf_bytes_list):
-        pdf_file_name = pdf_file_names[idx]
-        local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_method)
-        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
-
-        middle_json, infer_result = await aio_vlm_doc_analyze(
-            pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **kwargs,
-        )
-
-        pdf_info = middle_json["pdf_info"]
-
-        _process_output(
-            pdf_info, pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
-            md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
-            f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-            f_make_md_mode, middle_json, infer_result, process_mode="vlm"
-        )
-
-
-def _process_vlm(
-        output_dir,
-        pdf_file_names,
-        pdf_bytes_list,
-        backend,
-        f_draw_layout_bbox,
-        f_draw_span_bbox,
-        f_dump_md,
-        f_dump_middle_json,
-        f_dump_model_output,
-        f_dump_orig_pdf,
-        f_dump_content_list,
-        f_make_md_mode,
-        server_url=None,
-        **kwargs,
-):
-    """同步处理VLM后端逻辑"""
-    parse_method = "vlm"
-    f_draw_span_bbox = False
-    if not backend.endswith("client"):
-        server_url = None
-
-    for idx, pdf_bytes in enumerate(pdf_bytes_list):
-        pdf_file_name = pdf_file_names[idx]
-        local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_method)
-        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
-
-        middle_json, infer_result = vlm_doc_analyze(
-            pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **kwargs,
-        )
-
-        pdf_info = middle_json["pdf_info"]
-
-        _process_output(
-            pdf_info, pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
-            md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
-            f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-            f_make_md_mode, middle_json, infer_result, process_mode="vlm"
-        )
-
-
-def _process_hybrid(
-        output_dir,
-        pdf_file_names,
-        pdf_bytes_list,
-        parse_method,
-        inline_formula_enable,
-        backend,
-        f_draw_layout_bbox,
-        f_draw_span_bbox,
-        f_dump_md,
-        f_dump_middle_json,
-        f_dump_model_output,
-        f_dump_orig_pdf,
-        f_dump_content_list,
-        f_make_md_mode,
-        server_url=None,
-        effort=DEFAULT_HYBRID_EFFORT,
-        **kwargs,
-):
-    hybrid_doc_analyze = _load_hybrid_analyze_entrypoint(
-        "doc_analyze",
-        f"hybrid-{backend}",
-    )
-    """同步处理hybrid后端逻辑"""
-    if not backend.endswith("client"):
-        server_url = None
-
-    for idx, pdf_bytes in enumerate(pdf_bytes_list):
-        pdf_file_name = pdf_file_names[idx]
-        local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, f"hybrid_{parse_method}")
-        image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
-
-        middle_json, infer_result = hybrid_doc_analyze(
-            pdf_bytes,
-            image_writer=image_writer,
-            backend=backend,
-            parse_method=parse_method,
-            inline_formula_enable=inline_formula_enable,
-            server_url=server_url,
-            effort=validate_effort(effort),
-            **kwargs,
-        )
-
-        pdf_info = middle_json["pdf_info"]
-
-        f_draw_span_bbox = False
-
-        _process_output(
-            pdf_info, pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
-            md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
-            f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-            f_make_md_mode, middle_json, infer_result, process_mode="vlm"
-        )
-
-
 async def _async_process_hybrid(
         output_dir,
         pdf_file_names,
         pdf_bytes_list,
         parse_method,
-        inline_formula_enable,
-        backend,
-        f_draw_layout_bbox,
-        f_draw_span_bbox,
         f_dump_md,
         f_dump_middle_json,
-        f_dump_model_output,
         f_dump_orig_pdf,
-        f_dump_content_list,
-        f_make_md_mode,
-        server_url=None,
-        effort=DEFAULT_HYBRID_EFFORT,
+        server_url,
         **kwargs,
 ):
-    aio_hybrid_doc_analyze = _load_hybrid_analyze_entrypoint(
-        "aio_doc_analyze",
-        f"hybrid-{backend}",
-    )
-    """异步处理hybrid后端逻辑"""
-    if not backend.endswith("client"):
-        server_url = None
+    # 延迟导入：hybrid 依赖 torch 等重模块，不拖慢服务启动。
+    from mineru.backend.hybrid.hybrid_analyze import aio_doc_analyze as aio_hybrid_doc_analyze
 
-    for idx, pdf_bytes in enumerate(pdf_bytes_list):
-        pdf_file_name = pdf_file_names[idx]
+    for pdf_file_name, pdf_bytes in zip(pdf_file_names, pdf_bytes_list):
         local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, f"hybrid_{parse_method}")
         image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
 
         middle_json, infer_result = await aio_hybrid_doc_analyze(
             pdf_bytes,
             image_writer=image_writer,
-            backend=backend,
+            backend=VLM_BACKEND,
             parse_method=parse_method,
-            inline_formula_enable=inline_formula_enable,
+            inline_formula_enable=True,
             server_url=server_url,
-            effort=validate_effort(effort),
+            image_analysis=True,
             **kwargs,
         )
 
-        pdf_info = middle_json["pdf_info"]
-
-        f_draw_span_bbox = False
-
         _process_output(
-            pdf_info, pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
-            md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
-            f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-            f_make_md_mode, middle_json, infer_result, process_mode="vlm"
+            middle_json["pdf_info"], pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
+            md_writer, False, False, f_dump_orig_pdf,
+            f_dump_md, False, f_dump_middle_json, False,
+            MakeMode.MM_MD, middle_json, infer_result, process_mode="vlm"
         )
 
 
@@ -740,251 +453,62 @@ def _remove_handled(indices, pdf_bytes_list, pdf_file_names, p_lang_list):
         del p_lang_list[index]
 
 
-def _resolve_office_vlm_backend(backend: str, is_async: bool) -> str | None:
-    """office 没有页图，只能借 VLM 的单图分析补图片语义；pipeline 无 VLM 则不做。"""
-    for prefix in ("vlm-", "hybrid-"):
-        if backend.startswith(prefix):
-            vlm_backend = backend[len(prefix):]
-            if vlm_backend == "engine":
-                return get_vlm_engine(inference_engine="auto", is_async=is_async)
-            return vlm_backend
-    return None
-
-
-def do_parse(
-        output_dir,
-        pdf_file_names: list[str],
-        pdf_bytes_list: list[bytes],
-        p_lang_list: list[str],
-        backend="pipeline",
-        parse_method="auto",
-        formula_enable=True,
-        table_enable=True,
-        server_url=None,
-        f_draw_layout_bbox=True,
-        f_draw_span_bbox=True,
-        f_dump_md=True,
-        f_dump_middle_json=True,
-        f_dump_model_output=True,
-        f_dump_orig_pdf=True,
-        f_dump_content_list=True,
-        f_make_md_mode=MakeMode.MM_MD,
-        start_page_id=0,
-        end_page_id=None,
-        image_analysis=True,
-        client_side_output_generation=False,
-        effort=DEFAULT_HYBRID_EFFORT,
-        **kwargs,
-):
-    backend = normalize_backend(backend)
-    audio_handled = _parse_audio_docs(
-        output_dir, pdf_file_names, pdf_bytes_list,
-        f_dump_md=f_dump_md,
-        f_dump_middle_json=f_dump_middle_json,
-        f_dump_model_output=f_dump_model_output,
-        f_dump_orig_file=f_dump_orig_pdf,
-        f_dump_content_list=f_dump_content_list,
-    )
-    _remove_handled(audio_handled, pdf_bytes_list, pdf_file_names, p_lang_list)
-    office_parsed = _parse_office_docs(output_dir, pdf_file_names, pdf_bytes_list)
-    office_vlm_backend = (
-        _resolve_office_vlm_backend(backend, is_async=False) if image_analysis else None
-    )
-    if office_vlm_backend:
-        for item in office_parsed:
-            analyze_office_images(
-                item.middle_json,
-                item.local_image_dir,
-                vlm_backend=office_vlm_backend,
-                server_url=server_url,
-                **kwargs,
-            )
-    need_remove_index = _write_parsed_outputs(
-        office_parsed,
-        f_dump_md=f_dump_md,
-        f_dump_middle_json=f_dump_middle_json,
-        f_dump_model_output=f_dump_model_output,
-        f_dump_orig_file=f_dump_orig_pdf,
-        f_dump_content_list=f_dump_content_list,
-        f_make_md_mode=f_make_md_mode,
-    )
-    _remove_handled(need_remove_index, pdf_bytes_list, pdf_file_names, p_lang_list)
-    if not pdf_bytes_list:
-        logger.info("No PDF or image files left to process.")
-        return
-
-    # 预处理PDF字节数据
-    pdf_bytes_list = _prepare_pdf_bytes(pdf_bytes_list, start_page_id, end_page_id)
-
-    if backend == "pipeline":
-        _process_pipeline(
-            output_dir, pdf_file_names, pdf_bytes_list, p_lang_list,
-            parse_method, formula_enable, table_enable,
-            f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
-            f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-            client_side_output_generation=client_side_output_generation,
-        )
-    else:
-        if backend.startswith("vlm-"):
-            backend = backend[4:]
-
-            if backend == "engine":
-                backend = get_vlm_engine(inference_engine='auto', is_async=False)
-
-            os.environ['MINERU_VLM_FORMULA_ENABLE'] = str(formula_enable)
-            os.environ['MINERU_VLM_TABLE_ENABLE'] = str(table_enable)
-
-            _process_vlm(
-                output_dir, pdf_file_names, pdf_bytes_list, backend,
-                f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
-                f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, image_analysis=image_analysis,
-                client_side_output_generation=client_side_output_generation, **kwargs,
-            )
-        elif backend.startswith("hybrid-"):
-            ensure_backend_dependencies(backend)
-            backend = backend[7:]
-
-            if backend == "engine":
-                backend = get_vlm_engine(inference_engine='auto', is_async=False)
-
-            os.environ['MINERU_VLM_TABLE_ENABLE'] = str(table_enable)
-            os.environ['MINERU_VLM_FORMULA_ENABLE'] = "true"
-
-            _process_hybrid(
-                output_dir, pdf_file_names, pdf_bytes_list, parse_method, formula_enable, backend,
-                f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
-                f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, effort=effort, image_analysis=image_analysis,
-                client_side_output_generation=client_side_output_generation, **kwargs,
-            )
-
-
 async def aio_do_parse(
         output_dir,
         pdf_file_names: list[str],
         pdf_bytes_list: list[bytes],
         p_lang_list: list[str],
-        backend="pipeline",
-        parse_method="auto",
-        formula_enable=True,
-        table_enable=True,
+        parse_method: str,
         server_url=None,
-        f_draw_layout_bbox=True,
-        f_draw_span_bbox=True,
         f_dump_md=True,
         f_dump_middle_json=True,
-        f_dump_model_output=True,
         f_dump_orig_pdf=True,
-        f_dump_content_list=True,
-        f_make_md_mode=MakeMode.MM_MD,
-        start_page_id=0,
-        end_page_id=None,
-        image_analysis=True,
-        client_side_output_generation=False,
-        effort=DEFAULT_HYBRID_EFFORT,
         **kwargs,
 ):
-    backend = normalize_backend(backend)
     # 音频推理同步且耗时，同 office 一样放到线程中。
     audio_handled = await asyncio.to_thread(
         _parse_audio_docs, output_dir, pdf_file_names, pdf_bytes_list,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
-        f_dump_model_output=f_dump_model_output,
+        f_dump_model_output=False,
         f_dump_orig_file=f_dump_orig_pdf,
-        f_dump_content_list=f_dump_content_list,
+        f_dump_content_list=False,
     )
     _remove_handled(audio_handled, pdf_bytes_list, pdf_file_names, p_lang_list)
     # Office 解析是同步且可能耗时的操作，异步入口需要放到线程中避免阻塞事件循环。
     office_parsed = await asyncio.to_thread(
         _parse_office_docs, output_dir, pdf_file_names, pdf_bytes_list
     )
-    office_vlm_backend = (
-        _resolve_office_vlm_backend(backend, is_async=True) if image_analysis else None
-    )
-    if office_vlm_backend:
-        # 图片分析必须留在事件循环里：async 引擎不支持同步 predict。
-        for item in office_parsed:
-            await aio_analyze_office_images(
-                item.middle_json,
-                item.local_image_dir,
-                vlm_backend=office_vlm_backend,
-                server_url=server_url,
-                **kwargs,
-            )
+    # 图片分析必须留在事件循环里：async 引擎不支持同步 predict。
+    for item in office_parsed:
+        await aio_analyze_office_images(
+            item.middle_json,
+            item.local_image_dir,
+            vlm_backend=VLM_BACKEND,
+            server_url=server_url,
+            **kwargs,
+        )
     need_remove_index = await asyncio.to_thread(
         _write_parsed_outputs,
         office_parsed,
         f_dump_md=f_dump_md,
         f_dump_middle_json=f_dump_middle_json,
-        f_dump_model_output=f_dump_model_output,
+        f_dump_model_output=False,
         f_dump_orig_file=f_dump_orig_pdf,
-        f_dump_content_list=f_dump_content_list,
-        f_make_md_mode=f_make_md_mode,
+        f_dump_content_list=False,
     )
     _remove_handled(need_remove_index, pdf_bytes_list, pdf_file_names, p_lang_list)
     if not pdf_bytes_list:
         logger.info("No PDF or image files left to process.")
         return
 
-    # 预处理PDF字节数据
-    pdf_bytes_list = _prepare_pdf_bytes(pdf_bytes_list, start_page_id, end_page_id)
+    # 统一经 pdfium 重写，跳过损坏页，避免下游解析失败。
+    pdf_bytes_list = [convert_pdf_bytes_to_bytes(pdf_bytes) for pdf_bytes in pdf_bytes_list]
 
-    if backend == "pipeline":
-        # pipeline模式暂不支持异步，使用同步处理方式
-        _process_pipeline(
-            output_dir, pdf_file_names, pdf_bytes_list, p_lang_list,
-            parse_method, formula_enable, table_enable,
-            f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
-            f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-            client_side_output_generation=client_side_output_generation,
-        )
-    else:
-        if backend.startswith("vlm-"):
-            backend = backend[4:]
+    os.environ['MINERU_VLM_TABLE_ENABLE'] = "True"
+    os.environ['MINERU_VLM_FORMULA_ENABLE'] = "true"
 
-            if backend == "engine":
-                backend = get_vlm_engine(inference_engine='auto', is_async=True)
-
-            os.environ['MINERU_VLM_FORMULA_ENABLE'] = str(formula_enable)
-            os.environ['MINERU_VLM_TABLE_ENABLE'] = str(table_enable)
-
-            await _async_process_vlm(
-                output_dir, pdf_file_names, pdf_bytes_list, backend,
-                f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
-                f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, image_analysis=image_analysis,
-                client_side_output_generation=client_side_output_generation, **kwargs,
-            )
-        elif backend.startswith("hybrid-"):
-            ensure_backend_dependencies(backend)
-            backend = backend[7:]
-
-            if backend == "engine":
-                backend = get_vlm_engine(inference_engine='auto', is_async=True)
-
-            os.environ['MINERU_VLM_TABLE_ENABLE'] = str(table_enable)
-            os.environ['MINERU_VLM_FORMULA_ENABLE'] = "true"
-
-            await _async_process_hybrid(
-                output_dir, pdf_file_names, pdf_bytes_list, parse_method, formula_enable, backend,
-                f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
-                f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, effort=effort, image_analysis=image_analysis,
-                client_side_output_generation=client_side_output_generation, **kwargs,
-            )
-
-
-if __name__ == "__main__":
-    # pdf_path = "../../demo/pdfs/demo3.pdf"
-    pdf_path = "C:/Users/zhaoxiaomeng/Downloads/4546d0e2-ba60-40a5-a17e-b68555cec741.pdf"
-
-    try:
-       do_parse("./output", [Path(pdf_path).stem], [read_fn(Path(pdf_path))],["ch"],
-                end_page_id=10,
-                backend='vlm-huggingface'
-                # backend = 'pipeline'
-                )
-    except Exception as e:
-        logger.exception(e)
+    await _async_process_hybrid(
+        output_dir, pdf_file_names, pdf_bytes_list, parse_method,
+        f_dump_md, f_dump_middle_json, f_dump_orig_pdf, server_url, **kwargs,
+    )

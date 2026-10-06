@@ -2,7 +2,6 @@
 import asyncio
 import os
 import time
-from collections import defaultdict
 
 import cv2
 import numpy as np
@@ -28,11 +27,9 @@ from mineru.backend.pipeline.model_list import AtomicModel
 from mineru.backend.utils.formula_number import optimize_hybrid_formula_number_blocks
 from mineru.backend.utils.runtime_utils import exclude_progress_bar_idle_time
 from mineru.backend.vlm.vlm_analyze import (
-    ModelSingleton,
     _get_model_async,
     _maybe_enable_serial_execution,
     aio_predictor_execution_guard,
-    predictor_execution_guard,
 )
 from mineru.data.data_reader_writer import DataWriter
 from mineru.utils.boxbase import calculate_overlap_area_2_minbox_area_ratio
@@ -55,7 +52,6 @@ from mineru.utils.ocr_utils import (
 from mineru.utils.pdf_classify import classify
 from mineru.utils.pdf_image_tools import (
     aio_load_images_from_pdf_bytes_range,
-    load_images_from_pdf_doc,
 )
 from mineru.utils.pdfium_guard import (
     close_pdfium_document,
@@ -78,7 +74,6 @@ HYBRID_VLM_OCR_DET_TEXT_TYPES = {
     MineruBlockType.DOC_TITLE,
     MineruBlockType.PARAGRAPH_TITLE,
 }
-HYBRID_ANALYZE_EFFORTS = {"medium", "high"}
 INLINE_FORMULA_CONTAINER_LABELS = {"table", "image", "chart", "display_formula"}
 MEDIUM_EFFORT_LAYOUT_LABEL_TO_VLM_TYPE = {
     "abstract": BlockType.TEXT,
@@ -105,13 +100,6 @@ MEDIUM_EFFORT_LAYOUT_LABEL_TO_VLM_TYPE = {
     "table": BlockType.TABLE,
     "display_formula": BlockType.EQUATION,
 }
-
-
-def _validate_parse_effort(effort: str = "medium") -> str:
-    """校验 Hybrid effort，避免静默走错解析强度分支。"""
-    if effort not in HYBRID_ANALYZE_EFFORTS:
-        raise ValueError('effort must be "medium" or "high"')
-    return effort
 
 
 def _vlm_type_for_medium_layout_label(label: str | None) -> str | None:
@@ -879,213 +867,6 @@ def _close_images(images_list):
                 pass
 
 
-def doc_analyze(
-        pdf_bytes,
-        image_writer: DataWriter | None,
-        predictor: MinerUClient | None = None,
-        backend="transformers",
-        parse_method: str = 'auto',
-        inline_formula_enable: bool = True,
-        model_path: str | None = None,
-        server_url: str | None = None,
-        image_analysis: bool = True,
-        effort: str = "medium",
-        **kwargs,
-):
-    effort = _validate_parse_effort(effort)
-    client_side_output_generation = bool(
-        kwargs.pop("client_side_output_generation", False)
-    )
-    if predictor is None:
-        predictor = ModelSingleton().get_model(backend, model_path, server_url, **kwargs)
-    predictor = _maybe_enable_serial_execution(predictor, backend)
-
-    device = get_device()
-    _ocr_enable = ocr_classify(pdf_bytes, parse_method=parse_method)
-
-    pdf_doc = open_pdfium_document(pdfium.PdfDocument, pdf_bytes)
-    middle_json = init_middle_json(
-        _ocr_enable,
-        effort=effort,
-    )
-    model_list = []
-    doc_closed = False
-    hybrid_pipeline_model = None
-    try:
-        page_count = get_pdfium_document_page_count(pdf_doc)
-        configured_window_size = get_processing_window_size(default=64)
-        effective_window_size = min(page_count, configured_window_size) if page_count else 0
-        total_windows = (
-            (page_count + effective_window_size - 1) // effective_window_size
-            if effective_window_size
-            else 0
-        )
-        logger.info(
-            f'Hybrid processing-window run. page_count={page_count}, '
-            f'window_size={configured_window_size}, total_windows={total_windows}'
-        )
-
-        batch_ratio = get_batch_ratio(device) if not _ocr_enable else 1
-
-        infer_start = time.time()
-        progress_bar = None
-        last_append_end_time = None
-        try:
-            for window_index, window_start in enumerate(range(0, page_count, effective_window_size or 1)):
-                window_end = min(page_count - 1, window_start + effective_window_size - 1)
-                images_list = load_images_from_pdf_doc(
-                    pdf_doc,
-                    start_page_id=window_start,
-                    end_page_id=window_end,
-                    image_type=ImageType.PIL,
-                    pdf_bytes=pdf_bytes,
-                )
-                try:
-                    images_pil_list = [image_dict["img_pil"] for image_dict in images_list]
-                    page_sizes = [_normalize_page_size(image) for image in images_pil_list]
-                    logger.info(
-                        f'Hybrid processing window {window_index + 1}/{total_windows}: '
-                        f'pages {window_start + 1}-{window_end + 1}/{page_count} '
-                        f'({len(images_pil_list)} pages)'
-                    )
-                    images_layout_res, hybrid_pipeline_model = _predict_layout_for_window(
-                        images_pil_list,
-                        inline_formula_enable,
-                        batch_ratio,
-                        _ocr_enable,
-                    )
-                    if effort == "medium":
-                        _apply_medium_table_orientation_labels(
-                            images_pil_list,
-                            images_layout_res,
-                            hybrid_pipeline_model,
-                            batch_ratio=batch_ratio,
-                        )
-                        vlm_blocks_list = [
-                            _build_medium_vlm_layout_blocks(
-                                page_layout_res,
-                                pil_img.width,
-                                pil_img.height,
-                            )
-                            for page_layout_res, pil_img in zip(images_layout_res, images_pil_list)
-                        ]
-                        with predictor_execution_guard(predictor):
-                            window_model_list = predictor.batch_extract_with_layout(
-                                images_pil_list,
-                                vlm_blocks_list,
-                                not_extract_list=None if _ocr_enable else not_extract_list,
-                                image_analysis=image_analysis,
-                            )
-                        optimize_hybrid_formula_number_blocks(window_model_list)
-                        if _ocr_enable:
-                            _apply_vlm_ocr_det_sidecars_for_window(
-                                images_pil_list,
-                                window_model_list,
-                                batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
-                        else:
-                            window_model_list = _process_ocr_and_formulas(
-                                images_pil_list,
-                                window_model_list,
-                                inline_formula_enable,
-                                batch_ratio=batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
-                    elif effort == "high":
-                        if _ocr_enable:
-                            with predictor_execution_guard(predictor):
-                                window_model_list = predictor.batch_two_step_extract(
-                                    images=images_pil_list,
-                                    image_analysis=image_analysis,
-                                )
-                            _apply_vlm_ocr_det_sidecars_for_window(
-                                images_pil_list,
-                                window_model_list,
-                                batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
-                        else:
-                            with predictor_execution_guard(predictor):
-                                window_model_list = predictor.batch_two_step_extract(
-                                    images=images_pil_list,
-                                    not_extract_list=not_extract_list,
-                                    image_analysis=image_analysis,
-                                )
-                            window_model_list = _process_ocr_and_formulas(
-                                images_pil_list,
-                                window_model_list,
-                                inline_formula_enable,
-                                batch_ratio=batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
-                    else:
-                        raise ValueError(f"Unsupported hybrid effort: {effort}")
-
-                    _apply_layout_title_split(
-                        window_model_list,
-                        images_layout_res,
-                        page_sizes,
-                    )
-                    model_list.extend(window_model_list)
-                    if progress_bar is None:
-                        progress_bar = tqdm(total=page_count, desc="Processing pages")
-                    else:
-                        exclude_progress_bar_idle_time(
-                            progress_bar,
-                            last_append_end_time,
-                            now=time.time(),
-                        )
-                    append_page_model_list_to_middle_json(
-                        middle_json,
-                        window_model_list,
-                        images_list,
-                        pdf_doc,
-                        image_writer,
-                        page_start_index=window_start,
-                        _ocr_enable=_ocr_enable,
-                        progress_bar=progress_bar,
-                    )
-                    last_append_end_time = time.time()
-                finally:
-                    _close_images(images_list)
-        finally:
-            if progress_bar is not None:
-                progress_bar.close()
-
-        infer_time = round(time.time() - infer_start, 2)
-        if infer_time > 0 and page_count > 0:
-            logger.debug(
-                f"processing-window infer finished, cost: {infer_time}, "
-                f"speed: {round(len(model_list) / infer_time, 3)} page/s"
-            )
-
-        if client_side_output_generation:
-            apply_server_side_postprocess(
-                middle_json["pdf_info"],
-                hybrid_pipeline_model,
-                _ocr_enable,
-            )
-        else:
-            finalize_middle_json(
-                middle_json["pdf_info"],
-                hybrid_pipeline_model,
-                _ocr_enable,
-                effort=effort,
-            )
-        close_pdfium_document(pdf_doc)
-        doc_closed = True
-        clean_memory(device)
-        return middle_json, model_list
-    finally:
-        if not doc_closed:
-            close_pdfium_document(pdf_doc)
-
-
 async def aio_doc_analyze(
     pdf_bytes,
     image_writer: DataWriter | None,
@@ -1096,10 +877,8 @@ async def aio_doc_analyze(
     model_path: str | None = None,
     server_url: str | None = None,
     image_analysis: bool = True,
-    effort: str = "medium",
     **kwargs,
 ):
-    effort = _validate_parse_effort(effort)
     client_side_output_generation = bool(
         kwargs.pop("client_side_output_generation", False)
     )
@@ -1111,10 +890,7 @@ async def aio_doc_analyze(
     _ocr_enable = ocr_classify(pdf_bytes, parse_method=parse_method)
 
     pdf_doc = open_pdfium_document(pdfium.PdfDocument, pdf_bytes)
-    middle_json = init_middle_json(
-        _ocr_enable,
-        effort=effort,
-    )
+    middle_json = init_middle_json(_ocr_enable)
     model_list = []
     doc_closed = False
     hybrid_pipeline_model = None
@@ -1161,82 +937,48 @@ async def aio_doc_analyze(
                         batch_ratio,
                         _ocr_enable,
                     )
-                    if effort == "medium":
-                        await asyncio.to_thread(
-                            _apply_medium_table_orientation_labels,
-                            images_pil_list,
-                            images_layout_res,
-                            hybrid_pipeline_model,
-                            batch_ratio,
+                    await asyncio.to_thread(
+                        _apply_medium_table_orientation_labels,
+                        images_pil_list,
+                        images_layout_res,
+                        hybrid_pipeline_model,
+                        batch_ratio,
+                    )
+                    vlm_blocks_list = [
+                        _build_medium_vlm_layout_blocks(
+                            page_layout_res,
+                            pil_img.width,
+                            pil_img.height,
                         )
-                        vlm_blocks_list = [
-                            _build_medium_vlm_layout_blocks(
-                                page_layout_res,
-                                pil_img.width,
-                                pil_img.height,
-                            )
-                            for page_layout_res, pil_img in zip(images_layout_res, images_pil_list)
-                        ]
-                        async with aio_predictor_execution_guard(predictor):
-                            window_model_list = await predictor.aio_batch_extract_with_layout(
-                                images_pil_list,
-                                vlm_blocks_list,
-                                not_extract_list=None if _ocr_enable else not_extract_list,
-                                image_analysis=image_analysis,
-                            )
-                        optimize_hybrid_formula_number_blocks(window_model_list)
-                        if _ocr_enable:
-                            await asyncio.to_thread(
-                                _apply_vlm_ocr_det_sidecars_for_window,
-                                images_pil_list,
-                                window_model_list,
-                                batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
-                        else:
-                            window_model_list = await asyncio.to_thread(
-                                _process_ocr_and_formulas,
-                                images_pil_list,
-                                window_model_list,
-                                inline_formula_enable,
-                                batch_ratio=batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
-                    elif effort == "high":
-                        if _ocr_enable:
-                            async with aio_predictor_execution_guard(predictor):
-                                window_model_list = await predictor.aio_batch_two_step_extract(
-                                    images=images_pil_list,
-                                    image_analysis=image_analysis,
-                                )
-                            await asyncio.to_thread(
-                                _apply_vlm_ocr_det_sidecars_for_window,
-                                images_pil_list,
-                                window_model_list,
-                                batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
-                        else:
-                            async with aio_predictor_execution_guard(predictor):
-                                window_model_list = await predictor.aio_batch_two_step_extract(
-                                    images=images_pil_list,
-                                    not_extract_list=not_extract_list,
-                                    image_analysis=image_analysis,
-                                )
-                            window_model_list = await asyncio.to_thread(
-                                _process_ocr_and_formulas,
-                                images_pil_list,
-                                window_model_list,
-                                inline_formula_enable,
-                                batch_ratio=batch_ratio,
-                                images_layout_res=images_layout_res,
-                                hybrid_pipeline_model=hybrid_pipeline_model,
-                            )
+                        for page_layout_res, pil_img in zip(images_layout_res, images_pil_list)
+                    ]
+                    async with aio_predictor_execution_guard(predictor):
+                        window_model_list = await predictor.aio_batch_extract_with_layout(
+                            images_pil_list,
+                            vlm_blocks_list,
+                            not_extract_list=None if _ocr_enable else not_extract_list,
+                            image_analysis=image_analysis,
+                        )
+                    optimize_hybrid_formula_number_blocks(window_model_list)
+                    if _ocr_enable:
+                        await asyncio.to_thread(
+                            _apply_vlm_ocr_det_sidecars_for_window,
+                            images_pil_list,
+                            window_model_list,
+                            batch_ratio,
+                            images_layout_res=images_layout_res,
+                            hybrid_pipeline_model=hybrid_pipeline_model,
+                        )
                     else:
-                        raise ValueError(f"Unsupported hybrid effort: {effort}")
+                        window_model_list = await asyncio.to_thread(
+                            _process_ocr_and_formulas,
+                            images_pil_list,
+                            window_model_list,
+                            inline_formula_enable,
+                            batch_ratio=batch_ratio,
+                            images_layout_res=images_layout_res,
+                            hybrid_pipeline_model=hybrid_pipeline_model,
+                        )
 
                     await asyncio.to_thread(
                         _apply_layout_title_split,
@@ -1290,7 +1032,6 @@ async def aio_doc_analyze(
                 middle_json["pdf_info"],
                 hybrid_pipeline_model,
                 _ocr_enable,
-                effort=effort,
             )
         close_pdfium_document(pdf_doc)
         doc_closed = True

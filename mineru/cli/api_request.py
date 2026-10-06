@@ -4,11 +4,10 @@ from typing import Annotated, Any, Optional
 
 from fastapi import File, Form, Request, UploadFile
 
-from mineru.cli.backend_options import BACKEND_HYBRID_HTTP_CLIENT
 from mineru.cli.public_http_client_policy import validate_public_http_client_request
 
 # kb-demo 只用 hybrid-http-client + auto 判定 + 中文 OCR，对外不再开放选择。
-PARSE_BACKEND = BACKEND_HYBRID_HTTP_CLIENT
+PARSE_BACKEND = "hybrid-http-client"
 PARSE_METHOD = "auto"
 PARSE_LANG = "ch"
 SWAGGER_UI_FILE_ARRAY_SCHEMA_EXTRA = {

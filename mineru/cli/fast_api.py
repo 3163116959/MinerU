@@ -61,7 +61,6 @@ from mineru.cli.api_protocol import (
     DEFAULT_MAX_CONCURRENT_REQUESTS,
     DEFAULT_PROCESSING_WINDOW_SIZE,
 )
-from mineru.cli.backend_options import DEFAULT_HYBRID_EFFORT
 from mineru.cli.vlm_preload import (
     maybe_preload_vlm_model,
     split_service_and_model_config,
@@ -742,33 +741,21 @@ async def run_parse_job(
     pdf_file_names, pdf_bytes_list = await asyncio.to_thread(load_parse_inputs, uploads)
     response_file_names = list(pdf_file_names)
 
-    parse_kwargs = dict(
+    await aio_do_parse(
         output_dir=output_dir,
         pdf_file_names=list(pdf_file_names),
         pdf_bytes_list=list(pdf_bytes_list),
         p_lang_list=[PARSE_LANG] * len(pdf_file_names),
-        backend=PARSE_BACKEND,
         parse_method=PARSE_METHOD,
-        effort=DEFAULT_HYBRID_EFFORT,
-        formula_enable=True,
-        table_enable=True,
-        image_analysis=True,
         server_url=request_options.server_url,
-        f_draw_layout_bbox=False,
-        f_draw_span_bbox=False,
         f_dump_md=request_options.return_md,
         f_dump_middle_json=request_options.return_middle_json,
-        f_dump_model_output=False,
         f_dump_orig_pdf=(
             request_options.return_original_file and request_options.response_format_zip
         ),
-        f_dump_content_list=False,
-        client_side_output_generation=False,
         **build_vlm_client_kwargs(request_options.model, request_options.api_key),
         **config,
     )
-
-    await aio_do_parse(**parse_kwargs)
     return response_file_names
 
 
