@@ -148,7 +148,7 @@ VLM 输出有随机性 → 文本若有细微差异，以块数/结构为准，�
 - [x] 阶段 1 删入口（含于阶段 3 回归）
 - [x] 阶段 2 收敛 API 参数（含于阶段 3 回归）
 - [x] 阶段 3 删后端派发分支
-- [ ] 阶段 4 kb-demo 同步
+- [x] 阶段 4 kb-demo 同步
 - [ ] 阶段 5 依赖与镜像
 - [ ] 第 5 节逐项验证
 
@@ -172,3 +172,9 @@ VLM 输出有随机性 → 文本若有细微差异，以块数/结构为准，�
   - 删 `backend_options.py`；`api_request.PARSE_BACKEND` 内联字面量。
   - 验证：被删符号 grep 无残留（`build/` 为旧构建产物，忽略）；ruff F 通过；新镜像内 import 通过；`docker compose up -d` healthy。
   - 回归（`tests/files/slim_p3/`）vs 基线：`report.json` 去耗时后完全一致（页数/块类型计数/图片数/`_backend`/`_effort`/`_ocr_enable`）；audio、xlsx md 字节一致；其余 md 差异仅在 VLM 图片描述与 OCR 空白（随机性），结构一致。
+- 2026-10-06 阶段 4：kb-demo commit `6f15af5`（`slim_regress.py` 一并纳入）。
+  - `sdk/models.py`：删 `Backend/Effort/ParseMethod/Lang`；`ParseOptions` 只留 server_url/model/api_key/return_md/return_middle_json/return_images/response_format_zip/return_original_file（与 MinerU 表单一致）；`to_form` 去 lang_list 分支。`sdk/__init__.py` 同步。
+  - `parse_service.build_options`：无条件带 server_url/model/api_key（缺凭证仍显式报错）；去 backend/effort/image/table/formula/client_side。
+  - `settings.py`：删 `BACKEND`、`EFFORT`、`CLIENT_SIDE_OUTPUT_GENERATION`。
+  - tests：去 backend/effort 用法；pytest 24 passed / 8 skipped（集成测试需 `MINERU_TEST_URL`）。
+  - 回归（`tests/files/slim_p4/`）vs 基线：`report.json` 去耗时后完全一致；音频请求不带 server_url 通过。
