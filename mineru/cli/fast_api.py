@@ -33,7 +33,6 @@ from base64 import b64encode
 
 from mineru.cli.common import (
     aio_do_parse,
-    do_parse,
     audio_suffixes,
     image_suffixes,
     normalize_upload_filename,
@@ -44,6 +43,9 @@ from mineru.cli.common import (
     uniquify_task_stems,
 )
 from mineru.cli.api_request import (
+    PARSE_BACKEND,
+    PARSE_LANG,
+    PARSE_METHOD,
     ParseRequestOptions,
     build_vlm_client_kwargs,
     parse_request_form,
@@ -147,29 +149,17 @@ class StoredUpload:
 class AsyncParseTask:
     task_id: str
     status: str
-    backend: str
     file_names: list[str]
     created_at: str
     output_dir: str
-    effort: str
-    parse_method: str
-    lang_list: list[str]
-    formula_enable: bool
-    table_enable: bool
-    image_analysis: bool
     server_url: Optional[str]
     model: Optional[str]
     api_key: Optional[str]
     return_md: bool
     return_middle_json: bool
-    return_model_output: bool
-    return_content_list: bool
     return_images: bool
     response_format_zip: bool
     return_original_file: bool
-    client_side_output_generation: bool
-    start_page_id: int
-    end_page_id: int
     upload_names: list[str]
     uploads: list[str]
     submit_order: int = 0
@@ -185,7 +175,7 @@ class AsyncParseTask:
         payload = {
             "task_id": self.task_id,
             "status": self.status,
-            "backend": self.backend,
+            "backend": PARSE_BACKEND,
             "file_names": self.file_names,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -418,20 +408,13 @@ def get_infer_result(
     return None
 
 
-def normalize_lang_list(lang_list: list[str], file_count: int) -> list[str]:
-    if len(lang_list) == file_count:
-        return lang_list
-    base_lang = lang_list[0] if lang_list else "ch"
-    return [base_lang] * file_count
-
-
-def get_parse_dir(output_dir: str, pdf_name: str, backend: str, parse_method: str) -> str:
+def get_parse_dir(output_dir: str, pdf_name: str) -> str:
     return str(
         resolve_parse_dir(
             output_dir,
             pdf_name,
-            backend,
-            parse_method,
+            PARSE_BACKEND,
+            PARSE_METHOD,
             allow_office_fallback=True,
             allow_audio_fallback=True,
         )
@@ -445,12 +428,8 @@ def is_task_terminal(status: str) -> bool:
 def build_result_dict(
     output_dir: str,
     pdf_file_names: list[str],
-    backend: str,
-    parse_method: str,
     return_md: bool,
     return_middle_json: bool,
-    return_model_output: bool,
-    return_content_list: bool,
     return_images: bool,
 ) -> dict[str, dict[str, Any]]:
     result_dict: dict[str, dict[str, Any]] = {}
@@ -458,11 +437,7 @@ def build_result_dict(
         result_dict[pdf_name] = {}
         data = result_dict[pdf_name]
 
-        try:
-            parse_dir = get_parse_dir(output_dir, pdf_name, backend, parse_method)
-        except ValueError:
-            logger.warning(f"Unknown backend type: {backend}, skipping {pdf_name}")
-            continue
+        parse_dir = get_parse_dir(output_dir, pdf_name)
 
         if not os.path.exists(parse_dir):
             continue
@@ -471,12 +446,6 @@ def build_result_dict(
             data["md_content"] = get_infer_result(".md", pdf_name, parse_dir)
         if return_middle_json:
             data["middle_json"] = get_infer_result("_middle.json", pdf_name, parse_dir)
-        if return_model_output:
-            data["model_output"] = get_infer_result("_model.json", pdf_name, parse_dir)
-        if return_content_list:
-            data["content_list"] = get_infer_result(
-                "_content_list.json", pdf_name, parse_dir
-            )
         if return_images:
             images_dir = os.path.join(parse_dir, "images")
             image_paths = get_images_dir_image_paths(images_dir)
@@ -500,12 +469,8 @@ def build_zip_arcname(
 def create_result_zip(
     output_dir: str,
     pdf_file_names: list[str],
-    backend: str,
-    parse_method: str,
     return_md: bool,
     return_middle_json: bool,
-    return_model_output: bool,
-    return_content_list: bool,
     return_images: bool,
     return_original_file: bool,
 ) -> str:
@@ -514,11 +479,7 @@ def create_result_zip(
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for pdf_name in pdf_file_names:
-            try:
-                parse_dir = get_parse_dir(output_dir, pdf_name, backend, parse_method)
-            except ValueError:
-                logger.warning(f"Unknown backend type: {backend}, skipping {pdf_name}")
-                continue
+            parse_dir = get_parse_dir(output_dir, pdf_name)
 
             if not os.path.exists(parse_dir):
                 continue
@@ -544,41 +505,6 @@ def create_result_zip(
                             pdf_name,
                             parse_dir,
                             f"{pdf_name}_middle.json",
-                        ),
-                    )
-
-            if return_model_output:
-                path = os.path.join(parse_dir, f"{pdf_name}_model.json")
-                if os.path.exists(path):
-                    zf.write(
-                        path,
-                        arcname=build_zip_arcname(
-                            pdf_name,
-                            parse_dir,
-                            f"{pdf_name}_model.json",
-                        ),
-                    )
-
-            if return_content_list:
-                path = os.path.join(parse_dir, f"{pdf_name}_content_list.json")
-                if os.path.exists(path):
-                    zf.write(
-                        path,
-                        arcname=build_zip_arcname(
-                            pdf_name,
-                            parse_dir,
-                            f"{pdf_name}_content_list.json",
-                        ),
-                    )
-
-                path = os.path.join(parse_dir, f"{pdf_name}_content_list_v2.json")
-                if os.path.exists(path):
-                    zf.write(
-                        path,
-                        arcname=build_zip_arcname(
-                            pdf_name,
-                            parse_dir,
-                            f"{pdf_name}_content_list_v2.json",
                         ),
                     )
 
@@ -628,12 +554,8 @@ async def build_result_response(
     status_code: int,
     output_dir: str,
     pdf_file_names: list[str],
-    backend: str,
-    parse_method: str,
     return_md: bool,
     return_middle_json: bool,
-    return_model_output: bool,
-    return_content_list: bool,
     return_images: bool,
     response_format_zip: bool,
     return_original_file: bool,
@@ -645,12 +567,8 @@ async def build_result_response(
                 create_result_zip,
                 output_dir=output_dir,
                 pdf_file_names=pdf_file_names,
-                backend=backend,
-                parse_method=parse_method,
                 return_md=return_md,
                 return_middle_json=return_middle_json,
-                return_model_output=return_model_output,
-                return_content_list=return_content_list,
                 return_images=return_images,
                 return_original_file=return_original_file,
             )
@@ -672,18 +590,14 @@ async def build_result_response(
         build_result_dict,
         output_dir=output_dir,
         pdf_file_names=pdf_file_names,
-        backend=backend,
-        parse_method=parse_method,
         return_md=return_md,
         return_middle_json=return_middle_json,
-        return_model_output=return_model_output,
-        return_content_list=return_content_list,
         return_images=return_images,
     )
     return JSONResponse(
         status_code=status_code,
         content={
-            "backend": backend,
+            "backend": PARSE_BACKEND,
             "version": __version__,
             "results": result_dict,
         },
@@ -712,12 +626,8 @@ async def build_sync_file_parse_response(
             status_code=200,
             output_dir=task.output_dir,
             pdf_file_names=task.file_names,
-            backend=task.backend,
-            parse_method=task.parse_method,
             return_md=task.return_md,
             return_middle_json=task.return_middle_json,
-            return_model_output=task.return_model_output,
-            return_content_list=task.return_content_list,
             return_images=task.return_images,
             response_format_zip=task.response_format_zip,
             return_original_file=task.return_original_file,
@@ -733,19 +643,15 @@ async def build_sync_file_parse_response(
         build_result_dict,
         output_dir=task.output_dir,
         pdf_file_names=task.file_names,
-        backend=task.backend,
-        parse_method=task.parse_method,
         return_md=task.return_md,
         return_middle_json=task.return_middle_json,
-        return_model_output=task.return_model_output,
-        return_content_list=task.return_content_list,
         return_images=task.return_images,
     )
     return JSONResponse(
         status_code=200,
         content={
             **task_payload,
-            "backend": task.backend,
+            "backend": PARSE_BACKEND,
             "version": __version__,
             "results": result_dict,
         },
@@ -830,49 +736,39 @@ def load_parse_inputs(uploads: list[StoredUpload]) -> tuple[list[str], list[byte
 async def run_parse_job(
     output_dir: str,
     uploads: list[StoredUpload],
-    request_options: ParseRequestOptions | AsyncParseTask,
+    request_options: AsyncParseTask,
     config: dict[str, Any],
 ) -> list[str]:
     pdf_file_names, pdf_bytes_list = await asyncio.to_thread(load_parse_inputs, uploads)
-    actual_lang_list = normalize_lang_list(request_options.lang_list, len(pdf_file_names))
     response_file_names = list(pdf_file_names)
 
     parse_kwargs = dict(
         output_dir=output_dir,
         pdf_file_names=list(pdf_file_names),
         pdf_bytes_list=list(pdf_bytes_list),
-        p_lang_list=list(actual_lang_list),
-        backend=request_options.backend,
-        parse_method=request_options.parse_method,
-        effort=getattr(request_options, "effort", DEFAULT_HYBRID_EFFORT),
-        formula_enable=request_options.formula_enable,
-        table_enable=request_options.table_enable,
-        image_analysis=request_options.image_analysis,
+        p_lang_list=[PARSE_LANG] * len(pdf_file_names),
+        backend=PARSE_BACKEND,
+        parse_method=PARSE_METHOD,
+        effort=DEFAULT_HYBRID_EFFORT,
+        formula_enable=True,
+        table_enable=True,
+        image_analysis=True,
         server_url=request_options.server_url,
         f_draw_layout_bbox=False,
         f_draw_span_bbox=False,
         f_dump_md=request_options.return_md,
         f_dump_middle_json=request_options.return_middle_json,
-        f_dump_model_output=request_options.return_model_output,
+        f_dump_model_output=False,
         f_dump_orig_pdf=(
             request_options.return_original_file and request_options.response_format_zip
         ),
-        f_dump_content_list=request_options.return_content_list,
-        start_page_id=request_options.start_page_id,
-        end_page_id=request_options.end_page_id,
-        client_side_output_generation=getattr(
-            request_options,
-            "client_side_output_generation",
-            False,
-        ),
+        f_dump_content_list=False,
+        client_side_output_generation=False,
         **build_vlm_client_kwargs(request_options.model, request_options.api_key),
         **config,
     )
 
-    if request_options.backend == "pipeline":
-        await asyncio.to_thread(do_parse, **parse_kwargs)
-    else:
-        await aio_do_parse(**parse_kwargs)
+    await aio_do_parse(**parse_kwargs)
     return response_file_names
 
 
@@ -898,29 +794,17 @@ async def create_async_parse_task(
         task = AsyncParseTask(
             task_id=task_id,
             status=TASK_PENDING,
-            backend=request_options.backend,
             file_names=file_names,
             created_at=utc_now_iso(),
             output_dir=task_output_dir,
-            effort=request_options.effort,
-            parse_method=request_options.parse_method,
-            lang_list=request_options.lang_list,
-            formula_enable=request_options.formula_enable,
-            table_enable=request_options.table_enable,
-            image_analysis=request_options.image_analysis,
             server_url=request_options.server_url,
             model=request_options.model,
             api_key=request_options.api_key,
             return_md=request_options.return_md,
             return_middle_json=request_options.return_middle_json,
-            return_model_output=request_options.return_model_output,
-            return_content_list=request_options.return_content_list,
             return_images=request_options.return_images,
             response_format_zip=request_options.response_format_zip,
             return_original_file=request_options.return_original_file,
-            client_side_output_generation=request_options.client_side_output_generation,
-            start_page_id=request_options.start_page_id,
-            end_page_id=request_options.end_page_id,
             upload_names=[upload.original_name for upload in uploads],
             uploads=[upload.path for upload in uploads],
         )
@@ -1244,10 +1128,8 @@ def get_task_manager() -> AsyncTaskManager:
         "Submit a parsing task to the shared async task manager, wait for it to "
         "finish, and return the final parsing result in the same response."
         "\n\nAudio files (wav/mp3/flac/ogg/wma/m4a/aac/mp4) are transcribed by WhisperX "
-        "(VAD removes silence, speaker diarization, Chinese-tuned). Backend/OCR/page options "
-        "are ignored for audio. Outputs: md = speaker-labelled transcript; content_list = one "
-        "speech item per segment; middle_json = segments with word-level timestamps; "
-        "model_output = raw ASR segments and diarization turns."
+        "(VAD removes silence, speaker diarization, Chinese-tuned). Outputs: "
+        "md = speaker-labelled transcript; middle_json = segments with word-level timestamps."
     ),
 )
 async def parse_pdf(
@@ -1297,10 +1179,8 @@ async def parse_pdf(
         "Submit files for parsing and return immediately with a task id that can be "
         "checked via the task status and result endpoints."
         "\n\nAudio files (wav/mp3/flac/ogg/wma/m4a/aac/mp4) are transcribed by WhisperX "
-        "(VAD removes silence, speaker diarization, Chinese-tuned). Backend/OCR/page options "
-        "are ignored for audio. Outputs: md = speaker-labelled transcript; content_list = one "
-        "speech item per segment; middle_json = segments with word-level timestamps; "
-        "model_output = raw ASR segments and diarization turns."
+        "(VAD removes silence, speaker diarization, Chinese-tuned). Outputs: "
+        "md = speaker-labelled transcript; middle_json = segments with word-level timestamps."
     ),
 )
 async def submit_parse_task(
@@ -1357,12 +1237,8 @@ async def get_async_task_result(
         status_code=200,
         output_dir=task.output_dir,
         pdf_file_names=task.file_names,
-        backend=task.backend,
-        parse_method=task.parse_method,
         return_md=task.return_md,
         return_middle_json=task.return_middle_json,
-        return_model_output=task.return_model_output,
-        return_content_list=task.return_content_list,
         return_images=task.return_images,
         response_format_zip=task.response_format_zip,
         return_original_file=task.return_original_file,
