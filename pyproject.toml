@@ -125,14 +125,8 @@ issues = "https://github.com/opendatalab/MinerU/issues"
 License = "https://github.com/opendatalab/MinerU/blob/master/LICENSE.md"
 
 [project.scripts]
-mineru = "mineru.cli.client:main"
-mineru-vllm-server = "mineru.cli.vlm_server:vllm_server"
-mineru-lmdeploy-server = "mineru.cli.vlm_server:lmdeploy_server"
-mineru-openai-server = "mineru.cli.vlm_server:openai_server"
 mineru-models-download = "mineru.cli.models_download:download_models"
 mineru-api = "mineru.cli.fast_api:main"
-mineru-router = "mineru.cli.router:main"
-mineru-gradio = "mineru.cli.gradio_app:main"
 
 [tool.uv]
 # 全平台不装 torchcodec：pyannote-audio 无条件依赖它，但本项目用不到 ——
@@ -165,11 +159,8 @@ addopts = "-s --cov=mineru --cov-report html"
 command_line = "-m pytest tests/unittest/test_e2e.py"
 source = ["mineru/"]
 omit = [
-    "*/gradio_app.py",
     "*/models_download.py",
     "*/fast_api.py",
-    "*/cli/client.py",
-    "*/vlm_vllm_server.py",
     "*/cli_parser.py",
 ]
 

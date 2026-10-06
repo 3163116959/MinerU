@@ -1,5 +1,5 @@
 # Copyright (c) Opendatalab. All rights reserved.
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
@@ -21,41 +21,6 @@ def split_service_and_model_config(
         service_config[key] = bool(raw_config.pop(key, default))
 
     return service_config, raw_config
-
-
-def build_local_api_cli_args(
-    extra_cli_args: Sequence[str],
-    *,
-    enable_vlm_preload: bool,
-) -> tuple[str, ...]:
-    args = tuple(extra_cli_args)
-    if not enable_vlm_preload:
-        return args
-
-    if "--enable-vlm-preload" in args or any(
-        arg.startswith("--enable-vlm-preload=") for arg in args
-    ):
-        return args
-
-    return args + ("--enable-vlm-preload", "true")
-
-
-def resolve_gradio_local_api_cli_args(
-    extra_cli_args: Sequence[str],
-    *,
-    api_url: str | None,
-    enable_vlm_preload: bool,
-) -> tuple[str, ...]:
-    if enable_vlm_preload and api_url:
-        logger.warning(
-            "Ignoring --enable-vlm-preload because --api-url points to an existing MinerU FastAPI service."
-        )
-        return tuple(extra_cli_args)
-
-    return build_local_api_cli_args(
-        extra_cli_args,
-        enable_vlm_preload=enable_vlm_preload,
-    )
 
 
 def preload_vlm_model(*, model_kwargs: Mapping[str, Any] | None = None) -> str:
