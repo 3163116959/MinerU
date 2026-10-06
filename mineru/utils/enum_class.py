@@ -108,11 +108,10 @@ class ModelPath:
 
 
 class AudioModelPath:
-    """音频模型：仓库 id 与本地子目录名，下载端与加载端共用。HF 与 ModelScope 同名。"""
-    whisper = ("Systran/faster-whisper-large-v3", "faster-whisper-large-v3")
-    align = ("jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn", "wav2vec2-large-xlsr-53-chinese-zh-cn")
+    """音频模型：仓库 id 与本地子目录名，下载端与加载端共用。"""
+    qwen_asr = ("Qwen/Qwen3-ASR-1.7B", "Qwen3-ASR-1.7B")
+    qwen_align = ("Qwen/Qwen3-ForcedAligner-0.6B", "Qwen3-ForcedAligner-0.6B")
     diarize = ("pyannote/speaker-diarization-community-1", "speaker-diarization-community-1")
-    nltk_data = "nltk_data"
 
 
 class SplitFlag:

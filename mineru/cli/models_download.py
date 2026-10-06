@@ -64,8 +64,7 @@ def download_vlm_models(model_source):
 
 
 def download_audio_models(model_source):
-    """下载 WhisperX 所需的 ASR/对齐/说话人分离模型与 nltk punkt_tab，全部落在同一根目录。"""
-    import nltk
+    """下载 Qwen3 ASR、强制对齐与说话人分离模型。"""
     from huggingface_hub import snapshot_download as hf_snapshot_download
     from modelscope import snapshot_download as ms_snapshot_download
 
@@ -74,20 +73,17 @@ def download_audio_models(model_source):
         os.getenv(AUDIO_MODELS_DIR_ENV_VAR, '~/.cache/mineru/audio')
     ))
     snapshot_download = ms_snapshot_download if model_source == 'modelscope' else hf_snapshot_download
-    for repo_id, sub_dir in (AudioModelPath.whisper, AudioModelPath.align, AudioModelPath.diarize):
+    for repo_id, sub_dir in (
+        AudioModelPath.qwen_asr,
+        AudioModelPath.qwen_align,
+        AudioModelPath.diarize,
+    ):
         logger.info(f"Downloading model: {repo_id}")
         snapshot_download(
             repo_id,
             local_dir=os.path.join(root, sub_dir),
             ignore_patterns=AUDIO_IGNORE_PATTERNS,
         )
-    # whisperx 对齐阶段固定加载 punkt_tab 分句；运行期离线，必须在此预置。
-    if not nltk.download(
-        'punkt_tab',
-        download_dir=os.path.join(root, AudioModelPath.nltk_data),
-        raise_on_error=True,
-    ):
-        raise RuntimeError("Failed to download nltk punkt_tab")
     logger.info(f"Audio models downloaded successfully to: {root}")
     configure_model(root, "audio", model_source)
 

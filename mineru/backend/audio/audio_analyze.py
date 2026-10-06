@@ -1,5 +1,5 @@
 # Copyright (c) Opendatalab. All rights reserved.
-"""音频解析入口：WhisperX 转写 + VAD 去静音 + 词级对齐 + 说话人分离，参数按中文调优。"""
+"""音频解析入口：Qwen3-ASR 转写 + VAD + 词级对齐 + 说话人分离。"""
 import math
 import os
 import tempfile
@@ -18,15 +18,6 @@ CHUNK_SIZE = 15
 VAD_ONSET = 0.5
 VAD_OFFSET = 0.363
 BATCH_SIZE = 8
-# Whisper 中文常输出繁体且少标点，简体带标点的提示句可同时纠正两者。
-INITIAL_PROMPT = "以下是普通话的句子，使用简体中文并带有标点。"
-BEAM_SIZE = 8
-# WhisperX forwards these options to faster-whisper; retain preceding text across VAD chunks.
-ASR_OPTIONS = {
-    "initial_prompt": INITIAL_PROMPT,
-    "beam_size": BEAM_SIZE,
-    "condition_on_previous_text": True,
-}
 
 _models = None
 # 模型常驻且非线程安全；串行推理同时避免与 vllm 争抢显存时并发放大峰值。
@@ -51,29 +42,31 @@ def _load_models():
         return _models
 
     root = _audio_models_root()
-    # whisperx 对齐阶段会 nltk_load punkt_tab，找不到才联网下载 → 指向烤入的数据，杜绝联网。
-    os.environ.setdefault("NLTK_DATA", os.path.join(root, AudioModelPath.nltk_data))
     os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
 
     import whisperx
+    from whisperx.asr_qwen import load_model as load_qwen_model
+    from whisperx.alignment_qwen import load_align_model as load_qwen_align_model
     from whisperx.diarize import DiarizationPipeline
 
-    # ctranslate2 只支持 cuda/cpu，mps/npu 等一律走 cpu。
     device = "cuda" if get_device().startswith("cuda") else "cpu"
-    compute_type = "float16" if device == "cuda" else "int8"
+    qwen_dtype = "float16" if device == "cuda" else "float32"
 
-    asr_model = whisperx.load_model(
-        os.path.join(root, AudioModelPath.whisper[1]),
+    asr_model = load_qwen_model(
+        os.path.join(root, AudioModelPath.qwen_asr[1]),
         device,
-        compute_type=compute_type,
         language=LANGUAGE,
-        asr_options=ASR_OPTIONS,
         vad_method="pyannote",
         vad_options={"chunk_size": CHUNK_SIZE, "vad_onset": VAD_ONSET, "vad_offset": VAD_OFFSET},
         local_files_only=True,
+        qwen_dtype=qwen_dtype,
     )
-    align_model, align_metadata = whisperx.load_align_model(
-        LANGUAGE, device, model_name=os.path.join(root, AudioModelPath.align[1])
+    align_model, align_metadata = load_qwen_align_model(
+        LANGUAGE,
+        device,
+        model_name=os.path.join(root, AudioModelPath.qwen_align[1]),
+        model_cache_only=True,
+        qwen_dtype=qwen_dtype,
     )
     diarize_model = DiarizationPipeline(
         model_name=os.path.join(root, AudioModelPath.diarize[1]), device=device
@@ -115,7 +108,7 @@ def _build_segments(aligned: dict) -> list[dict]:
 
 
 def _run(audio_path: str):
-    """VAD 切分 → 转写 → 对齐 → 说话人分离，返回 (对齐结果, 原始转写段, 说话人轮次, 时长)。"""
+    """VAD 切分 → Qwen 转写 → 对齐 → 说话人分离，返回 (对齐结果, 原始转写段, 说话人轮次, 时长)。"""
     import whisperx
 
     device, asr_model, align_model, align_metadata, diarize_model = _load_models()
@@ -129,7 +122,9 @@ def _run(audio_path: str):
     if not transcript["segments"]:
         return {"segments": []}, [], [], duration
 
-    aligned = whisperx.align(
+    from whisperx.alignment_qwen import align as align_qwen
+
+    aligned = align_qwen(
         transcript["segments"], align_model, align_metadata, audio, device,
         return_char_alignments=False,
     )

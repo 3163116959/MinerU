@@ -101,7 +101,7 @@ gradio = [
     "gradio-pdf>=0.0.22",
 ]
 audio = [
-    "whisperx>=3.8.6,<4",
+    "whisperx[qwen] @ git+https://github.com/m-bain/whisperX.git@194e0ba9d4767baf4c7d30a624f2638d204a0061",
 ]
 core = [
     "mineru[vlm]",

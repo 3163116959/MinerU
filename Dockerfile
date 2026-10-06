@@ -70,7 +70,7 @@ COPY mineru/cli/__init__.py mineru/cli/models_download.py /src/mineru/cli/
 # 权重几乎不变 → 放在依赖与业务代码之下，改 pyproject.toml / 代码都复用这层，
 # 推送/拉取时也只在系统层或下载器变化时才重传这几 GB。
 # 下载器依赖装进临时 --target 目录，同一 RUN 内删掉，不污染运行环境；
-# HOME 指向临时目录 → modelscope/nltk 等写到家目录的杂项随之一并清掉。
+# HOME 指向临时目录 → modelscope 写到家目录的杂项随之一并清掉。
 # 末尾 .incomplete 断言：宁可构建失败，也不把残缺权重烤进镜像。
 FROM system AS models
 ARG PIP_INDEX
@@ -78,7 +78,8 @@ RUN --mount=type=bind,from=downloader,source=/src,target=/opt/downloader \
     --mount=type=cache,target=/var/cache/pip \
     set -eux; \
     PIP_CACHE_DIR=/var/cache/pip python -m pip install --index-url "${PIP_INDEX}" \
-        --target /tmp/dl click loguru requests huggingface-hub modelscope nltk; \
+        --target /tmp/dl click loguru requests \
+        huggingface-hub==0.36.2 modelscope==1.39.1; \
     HOME=/tmp/dlhome \
     PYTHONPATH=/tmp/dl:/opt/downloader \
     MODELSCOPE_CACHE=/opt/models \
@@ -86,6 +87,7 @@ RUN --mount=type=bind,from=downloader,source=/src,target=/opt/downloader \
     MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json \
         python -m mineru.cli.models_download -s modelscope -m all; \
     ! find /opt/models -name '*.incomplete' | grep -q .; \
+    python -c 'import json, os; p="/opt/models/mineru.json"; c=json.load(open(p, encoding="utf-8")); m=c["models-dir"]; assert c["model-source"] == "modelscope"; assert all(os.path.isdir(m[k]) for k in ("pipeline", "vlm", "audio")), m'; \
     rm -rf /tmp/dl /tmp/dlhome
 
 # ========== deps：外部依赖 → /opt/venv，只由依赖清单决定 ==========
@@ -93,6 +95,20 @@ RUN --mount=type=bind,from=downloader,source=/src,target=/opt/downloader \
 # 与 system 分叉可让两边并行构建。
 FROM ${BASE_IMAGE} AS deps
 ARG PIP_INDEX
+ARG APT_MIRROR
+RUN if [ -n "${APT_MIRROR}" ]; then \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+            if [ -f "$f" ]; then \
+                sed -i "s|https\\?://deb.debian.org|http://${APT_MIRROR}|g; \
+                        s|https\\?://security.debian.org|http://${APT_MIRROR}|g" "$f"; \
+            fi; \
+        done; \
+    fi
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
@@ -111,7 +127,7 @@ COPY mineru/version.py ./mineru/version.py
 # 不加 --locked：uv.lock 记录的是 pypi.org URL，指向国内镜像源必然触发重解析，
 # 二者互斥 → 这里选镜像源（构建速度优先）。要严格复现就改用 --locked 并去掉 UV_DEFAULT_INDEX。
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-install-project --extra core
+    uv sync --no-sources --no-dev --no-install-project --extra core
 
 # ========== build：项目打成 wheel，装到 venv 之外的 /opt/app ==========
 FROM deps AS build
@@ -137,13 +153,14 @@ ENV PATH="/opt/venv/bin:/opt/app/bin:$PATH" \
     LC_ALL=C.UTF-8 \
     PYTHONIOENCODING=utf-8 \
     MINERU_TOOLS_CONFIG_JSON=/opt/models/mineru.json \
-    NLTK_DATA=/opt/models/audio/nltk_data \
     PYANNOTE_METRICS_ENABLED=false \
     MINERU_MODEL_SOURCE=local \
     MINERU_DEVICE_MODE=cpu
 
 WORKDIR /app
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
 ENTRYPOINT ["/bin/bash", "-c", "exec \"$@\"", "--"]
 CMD ["mineru-api", "--host", "0.0.0.0", "--port", "8000"]
