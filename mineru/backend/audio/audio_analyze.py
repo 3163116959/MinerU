@@ -2,11 +2,13 @@
 """音频解析入口：Qwen3-ASR 转写 + VAD + 词级对齐 + 说话人分离。"""
 import math
 import os
+import re
 import tempfile
 import threading
 import time
 
 from loguru import logger
+from wetext import Normalizer
 
 from mineru.utils.config_reader import get_device, get_local_models_dir
 from mineru.utils.enum_class import AudioModelPath
@@ -18,6 +20,11 @@ CHUNK_SIZE = 15
 VAD_ONSET = 0.5
 VAD_OFFSET = 0.363
 BATCH_SIZE = 8
+
+# Qwen3-ASR 贴近读音转写（"三三零零零"），ITN 规整为书面数字（"33000"）。
+_itn = Normalizer(lang=LANGUAGE, operator="itn")
+# Qwen3-ASR 把逐字母念的缩写输出为 "P D C A"，仅合并单个大写字母间的空格。
+_SPACED_LETTERS = re.compile(r"(?<=\b[A-Z]) (?=[A-Z]\b)")
 
 _models = None
 # 模型常驻且非线程安全；串行推理同时避免与 vllm 争抢显存时并发放大峰值。
@@ -83,8 +90,16 @@ def _clean_float(value):
     return round(value, 3) if math.isfinite(value) else None
 
 
+def _postprocess_text(text: str) -> str:
+    return _SPACED_LETTERS.sub("", _itn.normalize(text.strip()))
+
+
 def _build_segments(aligned: dict) -> list[dict]:
-    """把 whisperx 结果整理为稳定的段落结构，词级时间戳与说话人一并保留。"""
+    """把 whisperx 结果整理为稳定的段落结构，词级时间戳与说话人一并保留。
+
+    文本规整只作用于段落 text：对齐器需读音文本，必须在对齐后做；
+    规整后字数变化无法逐字映射，words 保留读音原文。
+    """
     segments = []
     for seg in aligned["segments"]:
         words = [
@@ -101,7 +116,7 @@ def _build_segments(aligned: dict) -> list[dict]:
             "start": _clean_float(seg["start"]),
             "end": _clean_float(seg["end"]),
             "speaker": seg.get("speaker"),
-            "text": seg["text"].strip(),
+            "text": _postprocess_text(seg["text"]),
             "words": words,
         })
     return segments

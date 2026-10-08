@@ -103,6 +103,8 @@ gradio = [
 audio = [
     # 用 commit 归档 tarball 而非 git+：构建期免装 git、免拉 ~42MB 完整历史；URL 内 SHA 即锁定版本。
     "whisperx[qwen] @ https://github.com/m-bain/whisperX/archive/194e0ba9d4767baf4c7d30a624f2638d204a0061.tar.gz",
+    # 中文 ITN（读音数字→书面数字）；FST 预编译随 wheel 分发，依赖 kaldifst 全平台有 wheel，免 pynini。
+    "wetext>=0.1.8,<0.2",
 ]
 core = [
     "mineru[vlm]",
@@ -130,6 +132,7 @@ mineru-models-download = "mineru.cli.models_download:download_models"
 mineru-api = "mineru.cli.fast_api:main"
 
 [tool.uv]
+index-url = "https://repo.huaweicloud.com/repository/pypi/simple"
 # 全平台不装 torchcodec：pyannote-audio 无条件依赖它，但本项目用不到 ——
 # whisperx 用 ffmpeg 解码，再把内存 waveform 交给 pyannote，torchcodec 只服务"按文件路径解码"。
 # 它也从未发布 Linux aarch64 wheel，保留会让 x86 与 arm 环境分叉。
