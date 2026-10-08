@@ -23,8 +23,11 @@ BATCH_SIZE = 8
 
 # Qwen3-ASR 贴近读音转写（"三三零零零"），ITN 规整为书面数字（"33000"）。
 _itn = Normalizer(lang=LANGUAGE, operator="itn")
-# Qwen3-ASR 把逐字母念的缩写输出为 "P D C A"，仅合并单个大写字母间的空格。
-_SPACED_LETTERS = re.compile(r"(?<=\b[A-Z]) (?=[A-Z]\b)")
+# Qwen3-ASR 把逐字母念的缩写拆成 "P DC A"：空格任一侧为孤立单个大写字母时合并。
+# 不用 \b：中文属 \w，"A循环" 间无词边界。两侧均为多字母（"ISO IEC"）不合并。
+_SPACED_LETTERS = re.compile(
+    r"(?<=(?<![A-Za-z])[A-Z]) (?=[A-Z])|(?<=[A-Z]) (?=[A-Z](?![A-Za-z]))"
+)
 
 _models = None
 # 模型常驻且非线程安全；串行推理同时避免与 vllm 争抢显存时并发放大峰值。
