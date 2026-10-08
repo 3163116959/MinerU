@@ -101,7 +101,8 @@ gradio = [
     "gradio-pdf>=0.0.22",
 ]
 audio = [
-    "whisperx[qwen] @ git+https://github.com/m-bain/whisperX.git@194e0ba9d4767baf4c7d30a624f2638d204a0061",
+    # 用 commit 归档 tarball 而非 git+：构建期免装 git、免拉 ~42MB 完整历史；URL 内 SHA 即锁定版本。
+    "whisperx[qwen] @ https://github.com/m-bain/whisperX/archive/194e0ba9d4767baf4c7d30a624f2638d204a0061.tar.gz",
 ]
 core = [
     "mineru[vlm]",

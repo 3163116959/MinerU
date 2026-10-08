@@ -95,20 +95,6 @@ RUN --mount=type=bind,from=downloader,source=/src,target=/opt/downloader \
 # 与 system 分叉可让两边并行构建。
 FROM ${BASE_IMAGE} AS deps
 ARG PIP_INDEX
-ARG APT_MIRROR
-RUN if [ -n "${APT_MIRROR}" ]; then \
-        for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
-            if [ -f "$f" ]; then \
-                sed -i "s|https\\?://deb.debian.org|http://${APT_MIRROR}|g; \
-                        s|https\\?://security.debian.org|http://${APT_MIRROR}|g" "$f"; \
-            fi; \
-        done; \
-    fi
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    rm -f /etc/apt/apt.conf.d/docker-clean && \
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \

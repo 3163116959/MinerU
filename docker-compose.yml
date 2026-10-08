@@ -1,6 +1,8 @@
 services:
   mineru-api:
     image: mineru-local:latest
+    # up 时总是先 build：靠层缓存增量构建，代码变动无需再手动 docker compose build
+    pull_policy: build
     build:
       context: .
     container_name: mineru-api

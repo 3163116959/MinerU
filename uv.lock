@@ -3202,7 +3202,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'vlm'", specifier = ">=4.57.3,<5.0.0" },
     { name = "uvicorn" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.10.1.1,<0.22.0" },
-    { name = "whisperx", extras = ["qwen"], marker = "extra == 'audio'", git = "https://github.com/m-bain/whisperX.git?rev=194e0ba9d4767baf4c7d30a624f2638d204a0061" },
+    { name = "whisperx", extras = ["qwen"], marker = "extra == 'audio'", url = "https://github.com/m-bain/whisperX/archive/194e0ba9d4767baf4c7d30a624f2638d204a0061.tar.gz" },
 ]
 provides-extras = ["test", "vlm", "vllm", "lmdeploy", "mlx", "s3", "pipeline", "gradio", "audio", "core", "all"]
 
@@ -7588,7 +7588,7 @@ wheels = [
 [[package]]
 name = "whisperx"
 version = "3.8.7rc1"
-source = { git = "https://github.com/m-bain/whisperX.git?rev=194e0ba9d4767baf4c7d30a624f2638d204a0061#194e0ba9d4767baf4c7d30a624f2638d204a0061" }
+source = { url = "https://github.com/m-bain/whisperX/archive/194e0ba9d4767baf4c7d30a624f2638d204a0061.tar.gz" }
 dependencies = [
     { name = "ctranslate2" },
     { name = "faster-whisper" },
@@ -7606,11 +7606,33 @@ dependencies = [
     { name = "transformers" },
     { name = "triton", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
+sdist = { hash = "sha256:60a424dbf0e7be7328e9cb94a1c36c0ff4bdec17f027c70dfdcbac89879168e3" }
 
 [package.optional-dependencies]
 qwen = [
     { name = "qwen-asr" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "ctranslate2", specifier = ">=4.5.0" },
+    { name = "faster-whisper", specifier = ">=1.2.0" },
+    { name = "huggingface-hub", specifier = ">=0.28.1" },
+    { name = "nltk", specifier = ">=3.9.1" },
+    { name = "numpy", specifier = ">=2.1.0" },
+    { name = "omegaconf", specifier = ">=2.3.0" },
+    { name = "pandas", specifier = ">=2.2.3" },
+    { name = "pyannote-audio", specifier = ">=4.0.0" },
+    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "qwen-asr", marker = "extra == 'qwen'", specifier = ">=0.0.6" },
+    { name = "torch", specifier = "~=2.8.0" },
+    { name = "torchaudio", specifier = "~=2.8.0" },
+    { name = "torchcodec", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or sys_platform == 'win32'", specifier = ">=0.6.0,<0.8.0" },
+    { name = "torchvision", specifier = "~=0.23.0" },
+    { name = "transformers", specifier = ">=4.48.0" },
+    { name = "triton", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=3.3.0" },
+]
+provides-extras = ["dev", "qwen"]
 
 [[package]]
 name = "win32-setctime"

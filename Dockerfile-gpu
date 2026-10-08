@@ -150,14 +150,7 @@ COPY pyproject.toml ./
 # 不带 [vllm]：镜像内 vllm/torch 已满足版本约束，uv 不会重装 → 保住 CUDA 绑定。
 # whisperx 的 torch~=2.8.0 / torchaudio~=2.8.0 同样由基础镜像满足。
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    set -eux; \
-    apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git; \
-    uv pip install --system --break-system-packages --no-sources -r pyproject.toml --extra core; \
-    apt-get purge -y git; \
-    apt-get autoremove -y
+    uv pip install --system --break-system-packages --no-sources -r pyproject.toml --extra core
 
 # ========== build：项目打成 wheel，装到 site-packages 之外的 /opt/app ==========
 FROM deps AS build
