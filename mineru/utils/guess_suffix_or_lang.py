@@ -4,12 +4,14 @@ from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 from xml.etree import ElementTree
 
+import anydoc
 from loguru import logger
 from magika import Magika
 
 
 DEFAULT_LANG = "txt"
 PDF_SIG_BYTES = b'%PDF'
+OLE_SIG_BYTES = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
 OOXML_ROOT_RELS = "_rels/.rels"
 OOXML_CONTENT_TYPES = "[Content_Types].xml"
 OOXML_PACKAGE_REL_NS = (
@@ -172,6 +174,11 @@ def _guess_ooxml_suffix_by_path(file_path: Path) -> str | None:
 
 
 def guess_suffix_by_bytes(file_bytes, file_path=None) -> str:
+    if file_bytes.startswith(OLE_SIG_BYTES):
+        office_suffix = anydoc.format_from_bytes(file_bytes)
+        if office_suffix:
+            return office_suffix
+
     ooxml_suffix = _guess_ooxml_suffix_by_bytes(file_bytes)
     if ooxml_suffix:
         return ooxml_suffix
@@ -185,6 +192,13 @@ def guess_suffix_by_bytes(file_bytes, file_path=None) -> str:
 def guess_suffix_by_path(file_path) -> str:
     if not isinstance(file_path, Path):
         file_path = Path(file_path)
+
+    # OLE subtypes share a signature; inspect the container rather than content patterns.
+    with file_path.open("rb") as source:
+        if source.read(len(OLE_SIG_BYTES)) == OLE_SIG_BYTES:
+            office_suffix = anydoc.format_from_bytes(OLE_SIG_BYTES + source.read())
+            if office_suffix:
+                return office_suffix
 
     ooxml_suffix = _guess_ooxml_suffix_by_path(file_path)
     if ooxml_suffix:
